@@ -9,7 +9,7 @@ import streamlit as st
 
 st.set_page_config(page_title="施策一覧 転記ツール", layout="wide")
 
-FMT_PATH = "FMT/施策一覧.xlsx"
+FMT_PATH = "施策一覧.xlsx"
 
 st.title("施策一覧 転記ツール")
 st.caption("転記用.xlsx から、施策一覧FMTの書式・数式・条件付き書式を維持したファイルを作成します。")
