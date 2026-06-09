@@ -24,45 +24,33 @@ def to_date(val):
         return None
 
 
-# ===== 超柔軟パース =====
+# ===== 解析（今回の構造専用・安定版） =====
 def parse_input(ws):
     media_blocks = {}
     current_media = None
 
     for row in range(1, ws.max_row + 1):
-        row_values = [ws.cell(row, col).value for col in range(1, 10)]
+        a = ws.cell(row, 1).value
+        b = ws.cell(row, 2).value
+        c = ws.cell(row, 3).value
 
-        # === 媒体行検出 ===
-        # 「1列目に文字があり、他が空」は媒体とみなす
-        if isinstance(row_values[0], str) and all(v is None for v in row_values[1:4]):
-            current_media = row_values[0].strip()
+        a_date = to_date(a)
+        b_date = to_date(b)
 
+        # ✅ 媒体行（A列が文字）
+        if isinstance(a, str) and not a_date:
+            current_media = a.strip()
             if current_media not in media_blocks:
                 media_blocks[current_media] = []
             continue
 
-        # === データ行検出 ===
-        if current_media:
-            dates = []
-            name = None
-
-            # 行の中から日付2つと文字1つを探す
-            for val in row_values:
-                d = to_date(val)
-                if d:
-                    dates.append(d)
-                elif isinstance(val, str) and val.strip():
-                    name = val.strip()
-
-            if len(dates) >= 2 and name:
-                start = min(dates)
-                end = max(dates)
-
-                media_blocks[current_media].append({
-                    "start": start,
-                    "end": end,
-                    "name": name
-                })
+        # ✅ データ行（日付2つ＋施策）
+        if current_media and a_date and b_date and c:
+            media_blocks[current_media].append({
+                "start": a_date,
+                "end": b_date,
+                "name": str(c).strip()
+            })
 
     return media_blocks
 
@@ -78,7 +66,7 @@ def build_workbook(input_bytes, fmt_bytes, selected_sheet):
 
     media_blocks = parse_input(src_ws)
 
-    # ✅ デバッグ（1回だけ表示）
+    # ✅ デバッグ確認
     st.write("DEBUG:", media_blocks)
 
     total_days = 0
@@ -95,6 +83,7 @@ def build_workbook(input_bytes, fmt_bytes, selected_sheet):
 
         campaigns = sorted(set(r["name"] for r in records))
 
+        # ヘッダ（G列以降）
         for i, name in enumerate(campaigns):
             ws.cell(row=1, column=7 + i).value = name
 
@@ -105,9 +94,11 @@ def build_workbook(input_bytes, fmt_bytes, selected_sheet):
         row = 2
 
         while current <= max_date:
+            # 日付
             ws.cell(row=row, column=1).value = current
             ws.cell(row=row, column=1).number_format = "yyyy/mm/dd"
 
+            # 施策フラグ
             for i, name in enumerate(campaigns):
                 flag = 0
                 for r in records:
@@ -121,7 +112,7 @@ def build_workbook(input_bytes, fmt_bytes, selected_sheet):
             row += 1
             total_days += 1
 
-    # ✅ 保険
+    # ✅ 0件対策
     if sheet_count == 0:
         ws = out_wb.create_sheet("NoData")
         ws.cell(1, 1).value = "データを取得できませんでした"
@@ -150,7 +141,7 @@ if input_file:
             selected_sheet
         )
 
-        st.success(f"媒体数：{sheet_count} / 日数：{total_days}")
+        st.success(f"✅ 完成！ 媒体:{sheet_count} 日数:{total_days}")
         st.balloons()
 
         st.download_button(
