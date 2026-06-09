@@ -1,108 +1,128 @@
 import io
-from datetime import datetime
+from datetime import datetime, timedelta
 import openpyxl
 import streamlit as st
 
-
 st.set_page_config(page_title="転記用生成ツール", layout="wide")
 
-FMT_PATH = "転記用FMT.xlsx"  # ←転記用フォーマット
+FMT_PATH = "転記用FMT.xlsx"
 
 st.title("転記用エクセル生成ツール")
-st.caption("施策一覧から転記用形式のExcelを生成します")
 
-# ✅ アップは施策一覧
 input_file = st.file_uploader("施策一覧をアップロード", type=["xlsx"])
 
+def parse_input(ws):
+    media_blocks = {}
+    current_media = None
 
-def build_workbook(input_bytes, fmt_bytes):
-    # ✅ 入力 = 施策一覧
-    src_wb = openpyxl.load_workbook(io.BytesIO(input_bytes), data_only=True)
+    for row in range(1, ws.max_row + 1):
+        a = ws.cell(row, 1).value
+        b = ws.cell(row, 2).value
+        c = ws.cell(row, 3).value
+        d = ws.cell(row, 4).value
 
-    # ✅ 出力 = 転記用FMT
+        # 媒体判定
+        if isinstance(a, str) and a not in ["開始日", None]:
+            current_media = a
+            if current_media not in media_blocks:
+                media_blocks[current_media] = []
+
+        # 施策行
+        elif current_media and isinstance(b, datetime) and isinstance(d, datetime):
+            media_blocks[current_media].append({
+                "start": b.date(),
+                "end": d.date(),
+                "name": c
+            })
+
+    return media_blocks
+
+
+def build_workbook(input_bytes, fmt_bytes, selected_sheet):
+    src_wb = openpyxl.load_workbook(io.BytesIO(input_bytes))
+    src_ws = src_wb[selected_sheet]
+
     out_wb = openpyxl.load_workbook(io.BytesIO(fmt_bytes))
-
     template_ws = out_wb.worksheets[0]
     out_wb.remove(template_ws)
 
-    sheet_count = 0
-    record_count = 0
+    media_blocks = parse_input(src_ws)
 
-    for src_ws in src_wb.worksheets:
+    total_count = 0
 
-        records_by_media = {}
+    for media, records in media_blocks.items():
 
-        # ===== 施策一覧を読み取る =====
-        for row in range(4, src_ws.max_row + 1):
-            start = src_ws.cell(row, 2).value
-            end = src_ws.cell(row, 1).value
-            name = src_ws.cell(row, 3).value
-            media = src_ws.title  # ←シート名を媒体扱い
+        ws = out_wb.copy_worksheet(template_ws)
+        ws.title = media[:31]
 
-            if not start or not end or not name:
-                continue
+        # === 施策ユニーク抽出 ===
+        campaigns = sorted(list(set(r["name"] for r in records)))
 
-            if media not in records_by_media:
-                records_by_media[media] = []
+        # === G列以降ヘッダ ===
+        for i, name in enumerate(campaigns):
+            ws.cell(row=1, column=7 + i).value = name
 
-            records_by_media[media].append({
-                "start": start,
-                "end": end,
-                "name": name
-            })
+        # === 日付範囲 ===
+        min_date = min(r["start"] for r in records)
+        max_date = max(r["end"] for r in records)
 
-        # ===== 媒体ごとにシート作成 =====
-        for media, records in records_by_media.items():
+        current = min_date
+        row = 2
 
-            ws = out_wb.copy_worksheet(template_ws)
-            ws.title = media[:31]
+        while current <= max_date:
+            ws.cell(row=row, column=1).value = current
+            ws.cell(row=row, column=1).number_format = "yyyy/mm/dd"
 
-            row_idx = 2  # 転記用の開始行想定
+            for i, name in enumerate(campaigns):
+                flag = 0
+                for r in records:
+                    if r["name"] == name and r["start"] <= current <= r["end"]:
+                        flag = 1
+                        break
 
-            for rec in records:
-                ws.cell(row_idx, 1).value = rec["start"]
-                ws.cell(row_idx, 2).value = rec["end"]
-                ws.cell(row_idx, 3).value = rec["name"]
+                ws.cell(row=row, column=7 + i).value = flag
 
-                row_idx += 1
-                record_count += 1
-
-            sheet_count += 1
+            current += timedelta(days=1)
+            row += 1
+            total_count += 1
 
     output = io.BytesIO()
     out_wb.save(output)
     output.seek(0)
 
-    return output.getvalue(), sheet_count, record_count
+    return output.getvalue(), total_count
 
 
 if input_file:
-    try:
-        with open(FMT_PATH, "rb") as f:
-            fmt_bytes = f.read()
+    wb = openpyxl.load_workbook(input_file)
+    sheet_names = wb.sheetnames
 
-        output_bytes, sheet_count, record_count = build_workbook(
-            input_file.getvalue(),
-            fmt_bytes
-        )
+    selected_sheet = st.selectbox("対象シートを選択", sheet_names)
 
-        st.success(
-            f"""
-作成完了！
+    if st.button("実行"):
+        try:
+            with open(FMT_PATH, "rb") as f:
+                fmt_bytes = f.read()
 
-媒体シート数：{sheet_count}
-件数：{record_count}
-"""
-        )
+            output, count = build_workbook(
+                input_file.getvalue(),
+                fmt_bytes,
+                selected_sheet
+            )
 
-        st.download_button(
-            "ダウンロード",
-            data=output_bytes,
-            file_name="転記用_媒体別.xlsx"
-        )
+            st.success(f"✅ 作成完了！ {count}日分生成")
 
-    except Exception as e:
-        st.error(f"エラー：{e}")
+            # 🎈復活
+            st.balloons()
+
+            st.download_button(
+                "ダウンロード",
+                data=output,
+                file_name="転記用_媒体別.xlsx"
+            )
+
+        except Exception as e:
+            st.error(f"エラー：{e}")
 
 else:
     st.info("施策一覧をアップロードしてください")
