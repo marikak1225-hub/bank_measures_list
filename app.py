@@ -31,18 +31,26 @@ def parse_input(ws):
 
     for row in range(1, ws.max_row + 1):
         a = ws.cell(row, 1).value
+        b = ws.cell(row, 2).value
+        c = ws.cell(row, 3).value
+        d = ws.cell(row, 4).value
 
-        # 媒体判定（文字かつ日付じゃない）
-        if isinstance(a, str) and not to_date(a):
+        # --- 媒体判定 ---
+        if isinstance(a, str) and a.strip() != "" and not to_date(a):
             current_media = a.strip()
             if current_media not in media_blocks:
                 media_blocks[current_media] = []
+            continue
 
-        # データ行
-        elif current_media:
-            start = to_date(ws.cell(row, 2).value)
-            end = to_date(ws.cell(row, 3).value)
-            name = ws.cell(row, 4).value
+        # --- 空行スキップ ---
+        if not any([a, b, c, d]):
+            continue
+
+        # --- データ行 ---
+        if current_media:
+            start = to_date(b)
+            end = to_date(c)
+            name = d
 
             if start and end and name:
                 media_blocks[current_media].append({
@@ -52,7 +60,6 @@ def parse_input(ws):
                 })
 
     return media_blocks
-
 
 # ===== メイン =====
 def build_workbook(input_bytes, fmt_bytes, selected_sheet):
