@@ -12,7 +12,7 @@ st.title("転記用エクセル生成ツール")
 input_file = st.file_uploader("施策一覧をアップロード", type=["xlsx"])
 
 
-# ===== 日付安全変換 =====
+# ===== 日付変換 =====
 def to_date(val):
     if isinstance(val, datetime):
         return val.date()
@@ -31,32 +31,30 @@ def parse_input(ws):
 
     for row in range(1, ws.max_row + 1):
         a = ws.cell(row, 1).value
-        b = ws.cell(row, 2).value
-        c = ws.cell(row, 3).value
-        d = ws.cell(row, 4).value
 
-        # 媒体判定
-        if isinstance(a, str) and a not in ["開始日", "", None]:
+        # 媒体判定（文字かつ日付じゃない）
+        if isinstance(a, str) and not to_date(a):
             current_media = a.strip()
             if current_media not in media_blocks:
                 media_blocks[current_media] = []
 
         # データ行
         elif current_media:
-            start = to_date(b)
-            end = to_date(d)
+            start = to_date(ws.cell(row, 2).value)
+            end = to_date(ws.cell(row, 3).value)
+            name = ws.cell(row, 4).value
 
-            if start and end and c:
+            if start and end and name:
                 media_blocks[current_media].append({
                     "start": start,
                     "end": end,
-                    "name": str(c).strip()
+                    "name": str(name).strip()
                 })
 
     return media_blocks
 
 
-# ===== メイン処理 =====
+# ===== メイン =====
 def build_workbook(input_bytes, fmt_bytes, selected_sheet):
     src_wb = openpyxl.load_workbook(io.BytesIO(input_bytes))
     src_ws = src_wb[selected_sheet]
@@ -72,19 +70,17 @@ def build_workbook(input_bytes, fmt_bytes, selected_sheet):
 
     for media, records in media_blocks.items():
 
-        # ✅ 空データスキップ（エラー回避）
+        # ✅ 空データ防止
         if not records:
             continue
 
-        # ===== シート作成 =====
         ws = out_wb.copy_worksheet(template_ws)
         ws.title = media[:31]
         sheet_count += 1
 
-        # ===== 施策ユニークリスト =====
+        # ===== 施策一覧 =====
         campaigns = sorted(set(r["name"] for r in records))
 
-        # ===== G列以降ヘッダ =====
         for i, name in enumerate(campaigns):
             ws.cell(row=1, column=7 + i).value = name
 
@@ -96,11 +92,9 @@ def build_workbook(input_bytes, fmt_bytes, selected_sheet):
         row = 2
 
         while current <= max_date:
-            # 日付
             ws.cell(row=row, column=1).value = current
             ws.cell(row=row, column=1).number_format = "yyyy/mm/dd"
 
-            # 施策フラグ
             for i, name in enumerate(campaigns):
                 flag = 0
                 for r in records:
@@ -113,6 +107,11 @@ def build_workbook(input_bytes, fmt_bytes, selected_sheet):
             current += timedelta(days=1)
             row += 1
             total_days += 1
+
+    # ✅ シート0防止（超重要）
+    if sheet_count == 0:
+        ws = out_wb.create_sheet(title="NoData")
+        ws.cell(1, 1).value = "データを取得できませんでした"
 
     output = io.BytesIO()
     out_wb.save(output)
@@ -141,14 +140,13 @@ if input_file:
 
             st.success(
                 f"""
-✅ 作成完了！
+✅ 完成！
 
-媒体シート数：{sheet_count}
-日数生成：{total_days}
+媒体数：{sheet_count}
+日数：{total_days}
 """
             )
 
-            # 🎈風船復活
             st.balloons()
 
             st.download_button(
@@ -162,4 +160,4 @@ if input_file:
             st.error(f"エラー：{e}")
 
 else:
-    st.info("施策一覧をアップロードしてください")
+    st.info("施策一覧をアップしてください")
