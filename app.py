@@ -1,154 +1,73 @@
 import io
-from copy import copy
-from datetime import datetime, date, timedelta
-
+from datetime import datetime
 import openpyxl
 import streamlit as st
 
 
-st.set_page_config(page_title="施策一覧 転記ツール", layout="wide")
+st.set_page_config(page_title="転記用生成ツール", layout="wide")
 
-SRC_PATH = "転記用.xlsx"
+FMT_PATH = "転記用FMT.xlsx"  # ←転記用フォーマット
 
-st.title("施策一覧 転記ツール")
-st.caption("媒体ごとにシート分割して出力します")
+st.title("転記用エクセル生成ツール")
+st.caption("施策一覧から転記用形式のExcelを生成します")
 
-fmt_file = st.file_uploader("施策一覧FMTをアップロード", type=["xlsx"])
-
-
-def to_date(value):
-    if isinstance(value, datetime):
-        return value.date()
-    if isinstance(value, date):
-        return value
-    return None
+# ✅ アップは施策一覧
+input_file = st.file_uploader("施策一覧をアップロード", type=["xlsx"])
 
 
-def is_active(value):
-    if value is None:
-        return False
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip() not in ("", "0", "-", "FALSE", "false")
-    if isinstance(value, (int, float)):
-        return value != 0
-    return False
+def build_workbook(input_bytes, fmt_bytes):
+    # ✅ 入力 = 施策一覧
+    src_wb = openpyxl.load_workbook(io.BytesIO(input_bytes), data_only=True)
 
-
-def copy_row_format(ws, src_row, dst_row):
-    ws.row_dimensions[dst_row].height = ws.row_dimensions[src_row].height
-
-    for col in range(1, ws.max_column + 1):
-        src = ws.cell(src_row, col)
-        dst = ws.cell(dst_row, col)
-
-        if src.has_style:
-            dst._style = copy(src._style)
-
-        dst.number_format = src.number_format
-        dst.font = copy(src.font)
-        dst.fill = copy(src.fill)
-        dst.border = copy(src.border)
-        dst.alignment = copy(src.alignment)
-        dst.protection = copy(src.protection)
-
-
-def continuous_ranges(date_list):
-    if not date_list:
-        return []
-
-    dates = sorted(set(date_list))
-    ranges = []
-
-    start = dates[0]
-    prev = dates[0]
-
-    for d in dates[1:]:
-        if d == prev + timedelta(days=1):
-            prev = d
-        else:
-            ranges.append((start, prev))
-            start = d
-            prev = d
-
-    ranges.append((start, prev))
-    return ranges
-
-
-def build_workbook(src_bytes, fmt_bytes):
-    src_wb = openpyxl.load_workbook(io.BytesIO(src_bytes), data_only=False)
-    out_wb = openpyxl.load_workbook(io.BytesIO(fmt_bytes), data_only=False)
+    # ✅ 出力 = 転記用FMT
+    out_wb = openpyxl.load_workbook(io.BytesIO(fmt_bytes))
 
     template_ws = out_wb.worksheets[0]
-
-    # もとのシート削除（コピー用にだけ使う）
     out_wb.remove(template_ws)
 
-    record_count = 0
     sheet_count = 0
+    record_count = 0
 
     for src_ws in src_wb.worksheets:
-        # ✅ テンプレコピーして新シート作成
-        ws = out_wb.copy_worksheet(template_ws)
-        ws.title = src_ws.title[:31]  # Excelシート名制限
 
-        section_template_row = 4
-        detail_template_row = 5
-        out_row = 4
+        records_by_media = {}
 
-        records = []
+        # ===== 施策一覧を読み取る =====
+        for row in range(4, src_ws.max_row + 1):
+            start = src_ws.cell(row, 2).value
+            end = src_ws.cell(row, 1).value
+            name = src_ws.cell(row, 3).value
+            media = src_ws.title  # ←シート名を媒体扱い
 
-        # データ収集
-        for col in range(7, src_ws.max_column + 1):
-            campaign_name = src_ws.cell(1, col).value
-
-            if campaign_name in (None, ""):
+            if not start or not end or not name:
                 continue
 
-            active_dates = []
+            if media not in records_by_media:
+                records_by_media[media] = []
 
-            for r in range(2, src_ws.max_row + 1):
-                current_date = to_date(src_ws.cell(r, 1).value)
-                value = src_ws.cell(r, col).value
+            records_by_media[media].append({
+                "start": start,
+                "end": end,
+                "name": name
+            })
 
-                if current_date and is_active(value):
-                    active_dates.append(current_date)
+        # ===== 媒体ごとにシート作成 =====
+        for media, records in records_by_media.items():
 
-            for start_date, end_date in continuous_ranges(active_dates):
-                records.append({
-                    "start": start_date,
-                    "end": end_date,
-                    "name": campaign_name
-                })
+            ws = out_wb.copy_worksheet(template_ws)
+            ws.title = media[:31]
 
-        # データなければスキップ（空シート防止）
-        if not records:
-            out_wb.remove(ws)
-            continue
+            row_idx = 2  # 転記用の開始行想定
 
-        sheet_count += 1
+            for rec in records:
+                ws.cell(row_idx, 1).value = rec["start"]
+                ws.cell(row_idx, 2).value = rec["end"]
+                ws.cell(row_idx, 3).value = rec["name"]
 
-        # 日付ソート
-        records.sort(key=lambda x: x["start"])
+                row_idx += 1
+                record_count += 1
 
-        # 出力
-        for rec in records:
-            if out_row > ws.max_row:
-                ws.insert_rows(out_row)
-
-            copy_row_format(ws, detail_template_row, out_row)
-
-            # ✅ FMTに合わせて逆（終了→開始）
-            ws.cell(out_row, 1).value = rec["end"]
-            ws.cell(out_row, 2).value = rec["start"]
-            ws.cell(out_row, 3).value = rec["name"]
-
-            ws.cell(out_row, 1).number_format = "yyyy/m/d"
-            ws.cell(out_row, 2).number_format = "yyyy/m/d"
-
-            out_row += 1
-            record_count += 1
+            sheet_count += 1
 
     output = io.BytesIO()
     out_wb.save(output)
@@ -157,14 +76,14 @@ def build_workbook(src_bytes, fmt_bytes):
     return output.getvalue(), sheet_count, record_count
 
 
-if fmt_file:
+if input_file:
     try:
-        with open(SRC_PATH, "rb") as f:
-            src_bytes = f.read()
+        with open(FMT_PATH, "rb") as f:
+            fmt_bytes = f.read()
 
         output_bytes, sheet_count, record_count = build_workbook(
-            src_bytes,
-            fmt_file.getvalue()
+            input_file.getvalue(),
+            fmt_bytes
         )
 
         st.success(
@@ -172,19 +91,18 @@ if fmt_file:
 作成完了！
 
 媒体シート数：{sheet_count}
-出力件数：{record_count:,}件
+件数：{record_count}
 """
         )
 
         st.download_button(
-            label="ダウンロード",
+            "ダウンロード",
             data=output_bytes,
-            file_name="施策一覧_媒体別.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            file_name="転記用_媒体別.xlsx"
         )
 
     except Exception as e:
         st.error(f"エラー：{e}")
 
 else:
-    st.info("施策一覧FMTをアップロードしてください")
+    st.info("施策一覧をアップロードしてください")
