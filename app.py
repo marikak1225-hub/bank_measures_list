@@ -144,7 +144,7 @@ if input_file:
         st.download_button(
             "ダウンロード",
             data=output,
-            file_name=f"転記用_{selected_sheet}.xlsx"
+            file_name=f"転記用_{selected_sheet}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
 
