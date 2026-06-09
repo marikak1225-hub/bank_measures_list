@@ -131,10 +131,14 @@ def build_workbook(transfer_bytes, fmt_bytes):
         if out_row > ws.max_row:
             ws.insert_rows(out_row)
 
+        # セクション行
         copy_row_format(ws, section_template_row, out_row)
         ws.cell(out_row, 1).value = src_ws.title
         out_row += 1
 
+        records = []
+
+        # データ収集
         for col in range(7, src_ws.max_column + 1):
             campaign_name = src_ws.cell(1, col).value
 
@@ -151,21 +155,32 @@ def build_workbook(transfer_bytes, fmt_bytes):
                     active_dates.append(current_date)
 
             for start_date, end_date in continuous_ranges(active_dates):
-                if out_row > ws.max_row:
-                    ws.insert_rows(out_row)
+                records.append({
+                    "start": start_date,
+                    "end": end_date,
+                    "name": campaign_name
+                })
 
-                copy_row_format(ws, detail_template_row, out_row)
+        # ソート
+        records.sort(key=lambda x: x["start"])
 
-                ws.cell(out_row, 1).value = datetime(start_date.year, start_date.month, start_date.day)
-                ws.cell(out_row, 2).value = datetime(end_date.year, end_date.month, end_date.day)
-                ws.cell(out_row, 3).value = campaign_name
+        # 出力
+        for rec in records:
+            if out_row > ws.max_row:
+                ws.insert_rows(out_row)
 
-                ws.cell(out_row, 1).number_format = "yyyy/m/d"
-                ws.cell(out_row, 2).number_format = "yyyy/m/d"
+            copy_row_format(ws, detail_template_row, out_row)
+    
+            ws.cell(out_row, 1).value = datetime(rec["start"].year, rec["start"].month, rec["start"].day)
+            ws.cell(out_row, 2).value = datetime(rec["end"].year, rec["end"].month, rec["end"].day)
+            ws.cell(out_row, 3).value = rec["name"]
 
-                out_row += 1
-                record_count += 1
+            ws.cell(out_row, 1).number_format = "yyyy/m/d"
+            ws.cell(out_row, 2).number_format = "yyyy/m/d"
 
+            out_row += 1
+            record_count += 1
+            
     if out_row <= ws.max_row:
         ws.delete_rows(out_row, ws.max_row - out_row + 1)
 
