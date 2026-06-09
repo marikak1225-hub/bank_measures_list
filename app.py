@@ -8,12 +8,12 @@ import streamlit as st
 
 st.set_page_config(page_title="施策一覧 転記ツール", layout="wide")
 
-FMT_PATH = "施策一覧.xlsx"
+SRC_PATH = "転記用.xlsx"
 
 st.title("施策一覧 転記ツール")
-st.caption("転記用.xlsx から、施策一覧FMTの書式・数式・条件付き書式を維持したファイルを作成します。")
+st.caption("媒体ごとにシート分割して出力します")
 
-transfer_file = st.file_uploader("転記用.xlsx をアップロード", type=["xlsx"])
+fmt_file = st.file_uploader("施策一覧FMTをアップロード", type=["xlsx"])
 
 
 def to_date(value):
@@ -76,65 +76,26 @@ def continuous_ranges(date_list):
     return ranges
 
 
-def build_workbook(transfer_bytes, fmt_bytes):
-    src_wb = openpyxl.load_workbook(io.BytesIO(transfer_bytes), data_only=False)
+def build_workbook(src_bytes, fmt_bytes):
+    src_wb = openpyxl.load_workbook(io.BytesIO(src_bytes), data_only=False)
     out_wb = openpyxl.load_workbook(io.BytesIO(fmt_bytes), data_only=False)
 
-    ws = out_wb.worksheets[0]
-    sheet_count = len(src_wb.worksheets)
+    template_ws = out_wb.worksheets[0]
+
+    # もとのシート削除（コピー用にだけ使う）
+    out_wb.remove(template_ws)
+
     record_count = 0
-
-    all_dates = []
-    for src_ws in src_wb.worksheets:
-        for r in range(2, src_ws.max_row + 1):
-            d = to_date(src_ws.cell(r, 1).value)
-            if d:
-                all_dates.append(d)
-
-    if not all_dates:
-        raise ValueError("転記用ファイルのA列に日付が見つかりませんでした。")
-
-    target_year = min(all_dates).year
-    target_month = min(all_dates).month
-    yyyymm = f"{target_year}{target_month:02d}"
-
-    ws.title = f"{target_year}年{target_month}月"
-
-    first_day = date(target_year, target_month, 1)
-    if target_month == 12:
-        next_month = date(target_year + 1, 1, 1)
-    else:
-        next_month = date(target_year, target_month + 1, 1)
-
-    month_dates = []
-    d = first_day
-    while d < next_month:
-        month_dates.append(d)
-        d += timedelta(days=1)
-
-    for i, d in enumerate(month_dates, start=4):
-        ws.cell(2, i).value = datetime(d.year, d.month, d.day)
-        ws.cell(2, i).number_format = "yyyy/m/d"
-
-        if ws.cell(3, i).value in (None, ""):
-            ws.cell(3, i).value = f'=TEXT({ws.cell(2, i).coordinate},"aaa")'
-
-    for row in ws.iter_rows(min_row=4, max_row=ws.max_row, min_col=1, max_col=ws.max_column):
-        for cell in row:
-            cell.value = None
-
-    section_template_row = 4
-    detail_template_row = 5
-    out_row = 4
+    sheet_count = 0
 
     for src_ws in src_wb.worksheets:
-        if out_row > ws.max_row:
-            ws.insert_rows(out_row)
+        # ✅ テンプレコピーして新シート作成
+        ws = out_wb.copy_worksheet(template_ws)
+        ws.title = src_ws.title[:31]  # Excelシート名制限
 
-        # セクション行
-        copy_row_format(ws, section_template_row, out_row)
-        ws.cell(out_row, 1).value = src_ws.title
-        out_row += 1
+        section_template_row = 4
+        detail_template_row = 5
+        out_row = 4
 
         records = []
 
@@ -161,7 +122,14 @@ def build_workbook(transfer_bytes, fmt_bytes):
                     "name": campaign_name
                 })
 
-        # ソート
+        # データなければスキップ（空シート防止）
+        if not records:
+            out_wb.remove(ws)
+            continue
+
+        sheet_count += 1
+
+        # 日付ソート
         records.sort(key=lambda x: x["start"])
 
         # 出力
@@ -170,9 +138,10 @@ def build_workbook(transfer_bytes, fmt_bytes):
                 ws.insert_rows(out_row)
 
             copy_row_format(ws, detail_template_row, out_row)
-    
-            ws.cell(out_row, 1).value = datetime(rec["start"].year, rec["start"].month, rec["start"].day)
-            ws.cell(out_row, 2).value = datetime(rec["end"].year, rec["end"].month, rec["end"].day)
+
+            # ✅ FMTに合わせて逆（終了→開始）
+            ws.cell(out_row, 1).value = rec["end"]
+            ws.cell(out_row, 2).value = rec["start"]
             ws.cell(out_row, 3).value = rec["name"]
 
             ws.cell(out_row, 1).number_format = "yyyy/m/d"
@@ -180,53 +149,42 @@ def build_workbook(transfer_bytes, fmt_bytes):
 
             out_row += 1
             record_count += 1
-            
-    if out_row <= ws.max_row:
-        ws.delete_rows(out_row, ws.max_row - out_row + 1)
-
-    ws.freeze_panes = "D4"
 
     output = io.BytesIO()
     out_wb.save(output)
     output.seek(0)
 
-    return yyyymm, output.getvalue(), sheet_count, record_count
+    return output.getvalue(), sheet_count, record_count
 
 
-if transfer_file:
+if fmt_file:
     try:
-        with open(FMT_PATH, "rb") as f:
-            fmt_bytes = f.read()
+        with open(SRC_PATH, "rb") as f:
+            src_bytes = f.read()
 
-        yyyymm, output_bytes, sheet_count, record_count = build_workbook(
-            transfer_file.getvalue(),
-            fmt_bytes
+        output_bytes, sheet_count, record_count = build_workbook(
+            src_bytes,
+            fmt_file.getvalue()
         )
 
         st.success(
             f"""
 作成完了！
 
-対象月：{yyyymm}
-媒体数：{sheet_count}
+媒体シート数：{sheet_count}
 出力件数：{record_count:,}件
 """
         )
 
-        st.balloons()
-
         st.download_button(
-            label="施策一覧ファイルをダウンロード",
+            label="ダウンロード",
             data=output_bytes,
-            file_name=f"施策一覧_{yyyymm}.xlsx",
+            file_name="施策一覧_媒体別.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
-    except FileNotFoundError:
-        st.error("施策一覧.xlsx が見つかりません。app.py と同じ階層に 施策一覧.xlsx を置いてください。")
-
     except Exception as e:
-        st.error(f"エラーが発生しました：{e}")
+        st.error(f"エラー：{e}")
 
 else:
-    st.info("転記用.xlsx をアップロードしてください。")
+    st.info("施策一覧FMTをアップロードしてください")
