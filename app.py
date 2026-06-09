@@ -24,42 +24,48 @@ def to_date(val):
         return None
 
 
-# ===== 入力解析 =====
+# ===== 超柔軟パース =====
 def parse_input(ws):
     media_blocks = {}
     current_media = None
 
     for row in range(1, ws.max_row + 1):
-        a = ws.cell(row, 1).value
-        b = ws.cell(row, 2).value
-        c = ws.cell(row, 3).value
-        d = ws.cell(row, 4).value
+        row_values = [ws.cell(row, col).value for col in range(1, 10)]
 
-        # --- 媒体判定 ---
-        if isinstance(a, str) and a.strip() != "" and not to_date(a):
-            current_media = a.strip()
+        # === 媒体行検出 ===
+        # 「1列目に文字があり、他が空」は媒体とみなす
+        if isinstance(row_values[0], str) and all(v is None for v in row_values[1:4]):
+            current_media = row_values[0].strip()
+
             if current_media not in media_blocks:
                 media_blocks[current_media] = []
             continue
 
-        # --- 空行スキップ ---
-        if not any([a, b, c, d]):
-            continue
-
-        # --- データ行 ---
+        # === データ行検出 ===
         if current_media:
-            start = to_date(b)
-            end = to_date(c)
-            name = d
+            dates = []
+            name = None
 
-            if start and end and name:
+            # 行の中から日付2つと文字1つを探す
+            for val in row_values:
+                d = to_date(val)
+                if d:
+                    dates.append(d)
+                elif isinstance(val, str) and val.strip():
+                    name = val.strip()
+
+            if len(dates) >= 2 and name:
+                start = min(dates)
+                end = max(dates)
+
                 media_blocks[current_media].append({
                     "start": start,
                     "end": end,
-                    "name": str(name).strip()
+                    "name": name
                 })
 
     return media_blocks
+
 
 # ===== メイン =====
 def build_workbook(input_bytes, fmt_bytes, selected_sheet):
@@ -72,12 +78,14 @@ def build_workbook(input_bytes, fmt_bytes, selected_sheet):
 
     media_blocks = parse_input(src_ws)
 
+    # ✅ デバッグ（1回だけ表示）
+    st.write("DEBUG:", media_blocks)
+
     total_days = 0
     sheet_count = 0
 
     for media, records in media_blocks.items():
 
-        # ✅ 空データ防止
         if not records:
             continue
 
@@ -85,13 +93,11 @@ def build_workbook(input_bytes, fmt_bytes, selected_sheet):
         ws.title = media[:31]
         sheet_count += 1
 
-        # ===== 施策一覧 =====
         campaigns = sorted(set(r["name"] for r in records))
 
         for i, name in enumerate(campaigns):
             ws.cell(row=1, column=7 + i).value = name
 
-        # ===== 日付範囲 =====
         min_date = min(r["start"] for r in records)
         max_date = max(r["end"] for r in records)
 
@@ -115,9 +121,9 @@ def build_workbook(input_bytes, fmt_bytes, selected_sheet):
             row += 1
             total_days += 1
 
-    # ✅ シート0防止（超重要）
+    # ✅ 保険
     if sheet_count == 0:
-        ws = out_wb.create_sheet(title="NoData")
+        ws = out_wb.create_sheet("NoData")
         ws.cell(1, 1).value = "データを取得できませんでした"
 
     output = io.BytesIO()
@@ -135,36 +141,23 @@ if input_file:
     selected_sheet = st.selectbox("対象シートを選択", sheet_names)
 
     if st.button("実行"):
-        try:
-            with open(FMT_PATH, "rb") as f:
-                fmt_bytes = f.read()
+        with open(FMT_PATH, "rb") as f:
+            fmt_bytes = f.read()
 
-            output, sheet_count, total_days = build_workbook(
-                input_file.getvalue(),
-                fmt_bytes,
-                selected_sheet
-            )
+        output, sheet_count, total_days = build_workbook(
+            input_file.getvalue(),
+            fmt_bytes,
+            selected_sheet
+        )
 
-            st.success(
-                f"""
-✅ 完成！
+        st.success(f"媒体数：{sheet_count} / 日数：{total_days}")
+        st.balloons()
 
-媒体数：{sheet_count}
-日数：{total_days}
-"""
-            )
-
-            st.balloons()
-
-            st.download_button(
-                "ダウンロード",
-                data=output,
-                file_name="転記用_媒体別.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-
-        except Exception as e:
-            st.error(f"エラー：{e}")
+        st.download_button(
+            "ダウンロード",
+            data=output,
+            file_name="転記用_媒体別.xlsx"
+        )
 
 else:
     st.info("施策一覧をアップしてください")
