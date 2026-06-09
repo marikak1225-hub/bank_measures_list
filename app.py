@@ -135,7 +135,7 @@ def build_workbook(transfer_bytes, fmt_bytes):
         ws.cell(out_row, 1).value = src_ws.title
         out_row += 1
 
-        for col in range(5, src_ws.max_column + 1):
+        for col in range(7, src_ws.max_column + 1):
             campaign_name = src_ws.cell(1, col).value
 
             if campaign_name in (None, ""):
