@@ -66,9 +66,6 @@ def build_workbook(input_bytes, fmt_bytes, selected_sheet):
 
     media_blocks = parse_input(src_ws)
 
-    # ✅ デバッグ確認
-    st.write("DEBUG:", media_blocks)
-
     total_days = 0
     sheet_count = 0
 
@@ -147,8 +144,9 @@ if input_file:
         st.download_button(
             "ダウンロード",
             data=output,
-            file_name="転記用_媒体別.xlsx"
-        )
+            file_name=f"転記用_{selected_sheet}.xlsx"
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
 
 else:
     st.info("施策一覧をアップしてください")
