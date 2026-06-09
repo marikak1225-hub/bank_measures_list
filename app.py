@@ -1,5 +1,5 @@
 import io
-from datetime import datetime, timedelta
+from datetime import datetime, date, timedelta
 import openpyxl
 import streamlit as st
 
@@ -11,6 +11,20 @@ st.title("転記用エクセル生成ツール")
 
 input_file = st.file_uploader("施策一覧をアップロード", type=["xlsx"])
 
+
+# ===== 日付安全変換 =====
+def to_date(val):
+    if isinstance(val, datetime):
+        return val.date()
+    if isinstance(val, date):
+        return val
+    try:
+        return datetime.strptime(str(val), "%Y/%m/%d").date()
+    except:
+        return None
+
+
+# ===== 入力解析 =====
 def parse_input(ws):
     media_blocks = {}
     current_media = None
@@ -22,22 +36,27 @@ def parse_input(ws):
         d = ws.cell(row, 4).value
 
         # 媒体判定
-        if isinstance(a, str) and a not in ["開始日", None]:
-            current_media = a
+        if isinstance(a, str) and a not in ["開始日", "", None]:
+            current_media = a.strip()
             if current_media not in media_blocks:
                 media_blocks[current_media] = []
 
-        # 施策行
-        elif current_media and isinstance(b, datetime) and isinstance(d, datetime):
-            media_blocks[current_media].append({
-                "start": b.date(),
-                "end": d.date(),
-                "name": c
-            })
+        # データ行
+        elif current_media:
+            start = to_date(b)
+            end = to_date(d)
+
+            if start and end and c:
+                media_blocks[current_media].append({
+                    "start": start,
+                    "end": end,
+                    "name": str(c).strip()
+                })
 
     return media_blocks
 
 
+# ===== メイン処理 =====
 def build_workbook(input_bytes, fmt_bytes, selected_sheet):
     src_wb = openpyxl.load_workbook(io.BytesIO(input_bytes))
     src_ws = src_wb[selected_sheet]
@@ -48,21 +67,28 @@ def build_workbook(input_bytes, fmt_bytes, selected_sheet):
 
     media_blocks = parse_input(src_ws)
 
-    total_count = 0
+    total_days = 0
+    sheet_count = 0
 
     for media, records in media_blocks.items():
 
+        # ✅ 空データスキップ（エラー回避）
+        if not records:
+            continue
+
+        # ===== シート作成 =====
         ws = out_wb.copy_worksheet(template_ws)
         ws.title = media[:31]
+        sheet_count += 1
 
-        # === 施策ユニーク抽出 ===
-        campaigns = sorted(list(set(r["name"] for r in records)))
+        # ===== 施策ユニークリスト =====
+        campaigns = sorted(set(r["name"] for r in records))
 
-        # === G列以降ヘッダ ===
+        # ===== G列以降ヘッダ =====
         for i, name in enumerate(campaigns):
             ws.cell(row=1, column=7 + i).value = name
 
-        # === 日付範囲 ===
+        # ===== 日付範囲 =====
         min_date = min(r["start"] for r in records)
         max_date = max(r["end"] for r in records)
 
@@ -70,9 +96,11 @@ def build_workbook(input_bytes, fmt_bytes, selected_sheet):
         row = 2
 
         while current <= max_date:
+            # 日付
             ws.cell(row=row, column=1).value = current
             ws.cell(row=row, column=1).number_format = "yyyy/mm/dd"
 
+            # 施策フラグ
             for i, name in enumerate(campaigns):
                 flag = 0
                 for r in records:
@@ -84,15 +112,16 @@ def build_workbook(input_bytes, fmt_bytes, selected_sheet):
 
             current += timedelta(days=1)
             row += 1
-            total_count += 1
+            total_days += 1
 
     output = io.BytesIO()
     out_wb.save(output)
     output.seek(0)
 
-    return output.getvalue(), total_count
+    return output.getvalue(), sheet_count, total_days
 
 
+# ===== UI =====
 if input_file:
     wb = openpyxl.load_workbook(input_file)
     sheet_names = wb.sheetnames
@@ -104,21 +133,29 @@ if input_file:
             with open(FMT_PATH, "rb") as f:
                 fmt_bytes = f.read()
 
-            output, count = build_workbook(
+            output, sheet_count, total_days = build_workbook(
                 input_file.getvalue(),
                 fmt_bytes,
                 selected_sheet
             )
 
-            st.success(f"✅ 作成完了！ {count}日分生成")
+            st.success(
+                f"""
+✅ 作成完了！
 
-            # 🎈復活
+媒体シート数：{sheet_count}
+日数生成：{total_days}
+"""
+            )
+
+            # 🎈風船復活
             st.balloons()
 
             st.download_button(
                 "ダウンロード",
                 data=output,
-                file_name="転記用_媒体別.xlsx"
+                file_name="転記用_媒体別.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
 
         except Exception as e:
