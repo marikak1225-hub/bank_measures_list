@@ -185,7 +185,7 @@ def write_regression_sheet(ws, model, X_cols):
 
         values = [
             label,
-            model.params[i],
+            model.params.iloc[i],
             model.bse[i],
             model.tvalues[i],
             model.pvalues[i],
