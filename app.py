@@ -48,8 +48,7 @@ def parse_input(ws):
 
         if isinstance(a, str) and not a_date:
             current_media = a.strip()
-            if current_media not in media_blocks:
-                media_blocks[current_media] = []
+            media_blocks.setdefault(current_media, [])
             continue
 
         if current_media and a_date and b_date and c:
@@ -112,9 +111,9 @@ def build_workbook(input_bytes, fmt_bytes, selected_sheet):
 
 
 # ==============================
-# 回帰分析（見た目再現）
+# 回帰分析（完全安定版）
 # ==============================
-def write_regression_sheet(ws, model, X_cols):
+def write_regression_sheet(ws, model):
 
     ws["A1"] = "概要"
 
@@ -174,27 +173,35 @@ def write_regression_sheet(ws, model, X_cols):
     # ===== 係数表 =====
     start = 16
     headers = ["", "係数", "標準誤差", "t", "P-値", "下限95%", "上限95%"]
-
     for col, h in enumerate(headers, 1):
         ws.cell(start, col, h).border = thin
 
+    # ←ここが完全修正ポイント
+    params = model.params
+    bse = model.bse
+    tvals = model.tvalues
+    pvals = model.pvalues
+    conf = model.conf_int()
+
     row = start + 1
 
-    for i, name in enumerate(model.params.index):
-        label = "切片" if name == "const" else X_cols[i-1] if i > 0 else "切片"
+    for i in range(len(params)):
+        name = params.index[i]
+
+        label = "切片" if name == "const" else str(name)
 
         values = [
             label,
-            model.params.iloc[i],
-            model.bse[i],
-            model.tvalues[i],
-            model.pvalues[i],
-            model.conf_int().iloc[i, 0],
-            model.conf_int().iloc[i, 1]
+            params.iloc[i],
+            bse.iloc[i],
+            tvals.iloc[i],
+            pvals.iloc[i],
+            conf.iloc[i, 0],
+            conf.iloc[i, 1]
         ]
 
-        for col, val in enumerate(values, 1):
-            ws.cell(row, col, val).border = thin
+        for col, v in enumerate(values, 1):
+            ws.cell(row, col, v).border = thin
 
         row += 1
 
@@ -222,13 +229,12 @@ def run_regression_all_sheets(input_bytes):
 
         y_clean = data.iloc[:, 0]
         X_clean = data.iloc[:, 1:]
-        X_cols = X_clean.columns
 
         X_clean = sm.add_constant(X_clean)
         model = sm.OLS(y_clean, X_clean).fit()
 
         ws = wb.create_sheet(sheet[:31])
-        write_regression_sheet(ws, model, X_cols)
+        write_regression_sheet(ws, model)
 
     output = io.BytesIO()
     wb.save(output)
@@ -264,11 +270,7 @@ with tab1:
             )
 
             st.success("✅ 完成")
-            st.download_button(
-                "ダウンロード",
-                data=output,
-                file_name=f"転記用_{selected_sheet}.xlsx"
-            )
+            st.download_button("ダウンロード", data=output)
 
 with tab2:
     st.title("回帰分析ツール")
