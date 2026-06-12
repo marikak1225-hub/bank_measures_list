@@ -1,17 +1,17 @@
 import io
 from datetime import datetime, date, timedelta
 import openpyxl
-from openpyxl.styles import Font, Border, Side
 import streamlit as st
 import pandas as pd
 import statsmodels.api as sm
+from openpyxl.styles import Font, Border, Side
 
-st.set_page_config(page_title="業務ツール", layout="wide")
+st.set_page_config(page_title="転記用生成ツール", layout="wide")
 
 FMT_PATH = "転記用FMT.xlsx"
 
 # ==============================
-# 共通
+# 罫線
 # ==============================
 thin = Border(
     left=Side(style="thin"),
@@ -20,6 +20,9 @@ thin = Border(
     bottom=Side(style="thin")
 )
 
+# ==============================
+# 日付変換
+# ==============================
 def to_date(val):
     if isinstance(val, datetime):
         return val.date()
@@ -32,7 +35,7 @@ def to_date(val):
 
 
 # ==============================
-# 転記ツール
+# 転記ツール（←完全に元に戻してる）
 # ==============================
 def parse_input(ws):
     media_blocks = {}
@@ -48,7 +51,8 @@ def parse_input(ws):
 
         if isinstance(a, str) and not a_date:
             current_media = a.strip()
-            media_blocks.setdefault(current_media, [])
+            if current_media not in media_blocks:
+                media_blocks[current_media] = []
             continue
 
         if current_media and a_date and b_date and c:
@@ -71,12 +75,17 @@ def build_workbook(input_bytes, fmt_bytes, selected_sheet):
 
     media_blocks = parse_input(src_ws)
 
+    total_days = 0
+    sheet_count = 0
+
     for media, records in media_blocks.items():
+
         if not records:
             continue
 
         ws = out_wb.copy_worksheet(template_ws)
         ws.title = media[:31]
+        sheet_count += 1
 
         campaigns = sorted(set(r["name"] for r in records))
 
@@ -91,6 +100,7 @@ def build_workbook(input_bytes, fmt_bytes, selected_sheet):
 
         while current <= max_date:
             ws.cell(row=row, column=1).value = current
+            ws.cell(row=row, column=1).number_format = "yyyy/mm/dd"
 
             for i, name in enumerate(campaigns):
                 flag = 0
@@ -98,26 +108,32 @@ def build_workbook(input_bytes, fmt_bytes, selected_sheet):
                     if r["name"] == name and r["start"] <= current <= r["end"]:
                         flag = 1
                         break
+
                 ws.cell(row=row, column=7 + i).value = flag
 
             current += timedelta(days=1)
             row += 1
+            total_days += 1
+
+    if sheet_count == 0:
+        ws = out_wb.create_sheet("NoData")
+        ws.cell(1, 1).value = "データを取得できませんでした"
 
     output = io.BytesIO()
     out_wb.save(output)
     output.seek(0)
 
-    return output.getvalue()
+    return output.getvalue(), sheet_count, total_days
 
 
 # ==============================
-# 回帰分析（完全安定版）
+# 回帰分析（安定版）
 # ==============================
 def write_regression_sheet(ws, model):
 
     ws["A1"] = "概要"
 
-    # ===== 回帰統計 =====
+    # 回帰統計
     ws["A3"] = "回帰統計"
     ws["A3"].font = Font(bold=True)
 
@@ -133,61 +149,25 @@ def write_regression_sheet(ws, model):
     for label, val in stats:
         ws.cell(row, 1, label)
         ws.cell(row, 2, float(val))
-        ws.cell(row, 1).border = thin
-        ws.cell(row, 2).border = thin
         row += 1
 
-    # ===== ANOVA =====
-    y = model.model.endog
-    y_mean = y.mean()
-
-    ss_total = ((y - y_mean) ** 2).sum()
-    ss_resid = (model.resid ** 2).sum()
-    ss_reg = ss_total - ss_resid
-
-    df_reg = model.df_model
-    df_resid = model.df_resid
-
-    ms_reg = ss_reg / df_reg if df_reg != 0 else 0
-    ms_resid = ss_resid / df_resid if df_resid != 0 else 0
-    f_val = ms_reg / ms_resid if ms_resid != 0 else 0
-
-    ws["A10"] = "分散分析表"
-
-    headers = ["", "自由度", "変動", "分散", "F"]
-    for col, h in enumerate(headers, 1):
-        ws.cell(11, col, h).border = thin
-
-    anova_data = [
-        ("回帰", df_reg, ss_reg, ms_reg, f_val),
-        ("残差", df_resid, ss_resid, ms_resid, ""),
-        ("合計", df_reg + df_resid, ss_total, "", "")
-    ]
-
-    row = 12
-    for r in anova_data:
-        for col, val in enumerate(r, 1):
-            ws.cell(row, col, val).border = thin
-        row += 1
-
-    # ===== 係数表 =====
-    start = 16
+    # 係数
+    row = 10
     headers = ["", "係数", "標準誤差", "t", "P-値", "下限95%", "上限95%"]
-    for col, h in enumerate(headers, 1):
-        ws.cell(start, col, h).border = thin
 
-    # ←ここが完全修正ポイント
+    for col, h in enumerate(headers, 1):
+        ws.cell(row, col, h).border = thin
+
     params = model.params
     bse = model.bse
     tvals = model.tvalues
     pvals = model.pvalues
     conf = model.conf_int()
 
-    row = start + 1
+    row += 1
 
     for i in range(len(params)):
         name = params.index[i]
-
         label = "切片" if name == "const" else str(name)
 
         values = [
@@ -248,34 +228,47 @@ def run_regression_all_sheets(input_bytes):
 # ==============================
 tab1, tab2 = st.tabs(["転記用生成", "回帰分析"])
 
+
+# ===== タブ1（完全復元）=====
 with tab1:
     st.title("転記用エクセル生成ツール")
 
-    input_file = st.file_uploader("施策一覧をアップロード", type=["xlsx"], key="t1")
+    input_file = st.file_uploader("施策一覧をアップロード", type=["xlsx"])
 
     if input_file:
         wb = openpyxl.load_workbook(input_file)
         sheet_names = wb.sheetnames
 
-        selected_sheet = st.selectbox("対象シート", sheet_names)
+        selected_sheet = st.selectbox("対象シートを選択", sheet_names)
 
         if st.button("実行"):
             with open(FMT_PATH, "rb") as f:
                 fmt_bytes = f.read()
 
-            output = build_workbook(
+            output, sheet_count, total_days = build_workbook(
                 input_file.getvalue(),
                 fmt_bytes,
                 selected_sheet
             )
 
-            st.success("✅ 完成")
-            st.download_button("ダウンロード", data=output)
+            st.success(f"✅ 完成！ 媒体:{sheet_count} 日数:{total_days}")
+            st.balloons()  # ←風船復活
 
+            st.download_button(
+                "ダウンロード",
+                data=output,
+                file_name=f"転記用_{selected_sheet}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+    else:
+        st.info("施策一覧をアップしてください")
+
+
+# ===== タブ2 =====
 with tab2:
     st.title("回帰分析ツール")
 
-    reg_file = st.file_uploader("ファイルアップロード", type=["xlsx"], key="t2")
+    reg_file = st.file_uploader("回帰分析用ファイルをアップロード", type=["xlsx"], key="reg")
 
     if reg_file:
         if st.button("回帰分析実行"):
@@ -283,9 +276,12 @@ with tab2:
             result = run_regression_all_sheets(reg_file.getvalue())
             today_str = datetime.now().strftime("%Y%m%d")
 
-            st.success("✅ 完了")
+            st.success("✅ 回帰分析完了！")
+            st.balloons()  # ←こっちも残してOK
+
             st.download_button(
                 "ダウンロード",
                 data=result,
-                file_name=f"回帰分析結果_{today_str}.xlsx"
+                file_name=f"回帰分析結果_{today_str}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
