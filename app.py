@@ -4,7 +4,7 @@ import openpyxl
 import streamlit as st
 import pandas as pd
 import statsmodels.api as sm
-from openpyxl.styles import Font, Border, Side
+from openpyxl.styles import Border, Side
 
 st.set_page_config(page_title="転記用生成ツール", layout="wide")
 
@@ -35,7 +35,7 @@ def to_date(val):
 
 
 # ==============================
-# 転記ツール（←完全に元に戻してる）
+# 転記ツール（完全そのまま）
 # ==============================
 def parse_input(ws):
     media_blocks = {}
@@ -127,70 +127,15 @@ def build_workbook(input_bytes, fmt_bytes, selected_sheet):
 
 
 # ==============================
-# 回帰分析（安定版）
+# 回帰分析（OK出てたシンプル版）
 # ==============================
-def write_regression_sheet(ws, model):
-
-    ws["A1"] = "概要"
-
-    # 回帰統計
-    ws["A3"] = "回帰統計"
-    ws["A3"].font = Font(bold=True)
-
-    stats = [
-        ("重相関 R", model.rsquared**0.5),
-        ("決定係数 R2", model.rsquared),
-        ("補正 R2", model.rsquared_adj),
-        ("標準誤差", (model.mse_resid)**0.5),
-        ("観測数", int(model.nobs))
-    ]
-
-    row = 4
-    for label, val in stats:
-        ws.cell(row, 1, label)
-        ws.cell(row, 2, float(val))
-        row += 1
-
-    # 係数
-    row = 10
-    headers = ["", "係数", "標準誤差", "t", "P-値", "下限95%", "上限95%"]
-
-    for col, h in enumerate(headers, 1):
-        ws.cell(row, col, h).border = thin
-
-    params = model.params
-    bse = model.bse
-    tvals = model.tvalues
-    pvals = model.pvalues
-    conf = model.conf_int()
-
-    row += 1
-
-    for i in range(len(params)):
-        name = params.index[i]
-        label = "切片" if name == "const" else str(name)
-
-        values = [
-            label,
-            params.iloc[i],
-            bse.iloc[i],
-            tvals.iloc[i],
-            pvals.iloc[i],
-            conf.iloc[i, 0],
-            conf.iloc[i, 1]
-        ]
-
-        for col, v in enumerate(values, 1):
-            ws.cell(row, col, v).border = thin
-
-        row += 1
-
-
 def run_regression_all_sheets(input_bytes):
     xls = pd.ExcelFile(io.BytesIO(input_bytes))
 
-    wb = openpyxl.Workbook()
-    wb.remove(wb.active)
+    output = io.BytesIO()
+    writer = pd.ExcelWriter(output, engine="openpyxl")
+
+    sheet_count = 0
 
     for sheet in xls.sheet_names:
         df = pd.read_excel(xls, sheet_name=sheet)
@@ -198,9 +143,13 @@ def run_regression_all_sheets(input_bytes):
         if df.shape[1] < 7:
             continue
 
+        # Y = D列
         y = df.iloc[:, 3]
+
+        # X = G列以降
         X = df.iloc[:, 6:]
 
+        # シンプル処理（←OK出てたやつ）
         data = pd.concat([y, X], axis=1)
         data = data.apply(pd.to_numeric, errors='coerce').dropna()
 
@@ -211,13 +160,43 @@ def run_regression_all_sheets(input_bytes):
         X_clean = data.iloc[:, 1:]
 
         X_clean = sm.add_constant(X_clean)
+
         model = sm.OLS(y_clean, X_clean).fit()
 
-        ws = wb.create_sheet(sheet[:31])
-        write_regression_sheet(ws, model)
+        # ===== 回帰統計 =====
+        stats = pd.DataFrame({
+            "項目": ["重相関 R", "決定係数 R2", "補正 R2", "標準誤差", "観測数"],
+            "値": [
+                model.rsquared**0.5,
+                model.rsquared,
+                model.rsquared_adj,
+                (model.mse_resid)**0.5,
+                int(model.nobs)
+            ]
+        })
 
-    output = io.BytesIO()
-    wb.save(output)
+        # ===== 係数 table =====
+        coef = pd.DataFrame({
+            "係数": model.params,
+            "標準誤差": model.bse,
+            "t": model.tvalues,
+            "P-値": model.pvalues,
+            "下限95%": model.conf_int()[0],
+            "上限95%": model.conf_int()[1]
+        })
+
+        sheet_name = sheet[:31]
+
+        stats.to_excel(writer, sheet_name=sheet_name, startrow=3, index=False)
+        coef.to_excel(writer, sheet_name=sheet_name, startrow=10)
+
+        sheet_count += 1
+
+    # 保険（エラー回避だけ）
+    if sheet_count == 0:
+        pd.DataFrame({"message": ["有効なデータなし"]}).to_excel(writer, sheet_name="NoData", index=False)
+
+    writer.close()
     output.seek(0)
 
     return output.getvalue()
@@ -229,7 +208,7 @@ def run_regression_all_sheets(input_bytes):
 tab1, tab2 = st.tabs(["転記用生成", "回帰分析"])
 
 
-# ===== タブ1（完全復元）=====
+# ===== タブ1 =====
 with tab1:
     st.title("転記用エクセル生成ツール")
 
@@ -252,7 +231,7 @@ with tab1:
             )
 
             st.success(f"✅ 完成！ 媒体:{sheet_count} 日数:{total_days}")
-            st.balloons()  # ←風船復活
+            st.balloons()
 
             st.download_button(
                 "ダウンロード",
@@ -277,7 +256,7 @@ with tab2:
             today_str = datetime.now().strftime("%Y%m%d")
 
             st.success("✅ 回帰分析完了！")
-            st.balloons()  # ←こっちも残してOK
+            st.balloons()
 
             st.download_button(
                 "ダウンロード",
