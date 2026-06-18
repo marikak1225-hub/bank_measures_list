@@ -65,57 +65,66 @@ def parse_input(ws):
     return media_blocks
 
 
-def build_workbook(input_bytes, fmt_bytes, selected_sheet):
+def build_workbook(input_bytes, fmt_bytes, selected_sheets):
     src_wb = openpyxl.load_workbook(io.BytesIO(input_bytes))
-    src_ws = src_wb[selected_sheet]
 
     out_wb = openpyxl.load_workbook(io.BytesIO(fmt_bytes))
     template_ws = out_wb.worksheets[0]
+
+    # 出力シートは1枚だけ作る
+    out_ws = out_wb.copy_worksheet(template_ws)
+    out_ws.title = "まとめ"
     out_wb.remove(template_ws)
 
-    media_blocks = parse_input(src_ws)
-
+    current_row_offset = 0
     total_days = 0
-    sheet_count = 0
 
-    for media, records in media_blocks.items():
+    for sheet_name in selected_sheets:
+        src_ws = src_wb[sheet_name]
+        media_blocks = parse_input(src_ws)
 
-        if not records:
-            continue
+        for media, records in media_blocks.items():
 
-        ws = out_wb.copy_worksheet(template_ws)
-        ws.title = media[:31]
-        sheet_count += 1
+            if not records:
+                continue
 
-        campaigns = sorted(set(r["name"] for r in records))
+            campaigns = sorted(set(r["name"] for r in records))
 
-        for i, name in enumerate(campaigns):
-            ws.cell(row=1, column=7 + i).value = name
-
-        min_date = min(r["start"] for r in records)
-        max_date = max(r["end"] for r in records)
-
-        current = min_date
-        row = 2
-
-        while current <= max_date:
-            ws.cell(row=row, column=1).value = current
-            ws.cell(row=row, column=1).number_format = "yyyy/mm/dd"
+            # ヘッダー
+            header_row = 1 + current_row_offset
+            
+            out_ws.cell(row=header_row - 1, column=1).value = f"【{sheet_name} - {media}】"
 
             for i, name in enumerate(campaigns):
-                flag = 0
-                for r in records:
-                    if r["name"] == name and r["start"] <= current <= r["end"]:
-                        flag = 1
-                        break
+                out_ws.cell(row=header_row, column=7 + i).value = name
 
-                ws.cell(row=row, column=7 + i).value = flag
+            min_date = min(r["start"] for r in records)
+            max_date = max(r["end"] for r in records)
 
-            current += timedelta(days=1)
-            row += 1
-            total_days += 1
+            current = min_date
+            row = header_row + 1
 
-    if sheet_count == 0:
+            while current <= max_date:
+                out_ws.cell(row=row, column=1).value = current
+                out_ws.cell(row=row, column=1).number_format = "yyyy/mm/dd"
+
+                for i, name in enumerate(campaigns):
+                    flag = 0
+                    for r in records:
+                        if r["name"] == name and r["start"] <= current <= r["end"]:
+                            flag = 1
+                            break
+
+                    out_ws.cell(row=row, column=7 + i).value = flag
+
+                current += timedelta(days=1)
+                row += 1
+                total_days += 1
+
+            # ✅ 次のブロック用に行を空ける（重要）
+            current_row_offset = row + 2
+
+    if current_row_offset == 0:
         ws = out_wb.create_sheet("NoData")
         ws.cell(1, 1).value = "データを取得できませんでした"
 
@@ -123,9 +132,8 @@ def build_workbook(input_bytes, fmt_bytes, selected_sheet):
     out_wb.save(output)
     output.seek(0)
 
-    return output.getvalue(), sheet_count, total_days
-
-
+    return output.getvalue(), len(selected_sheets), total_days
+    
 # ==============================
 # 回帰分析（見た目完全寄せ版）
 # ==============================
@@ -279,25 +287,24 @@ with tab1:
         wb = openpyxl.load_workbook(input_file)
         sheet_names = wb.sheetnames
 
-        selected_sheet = st.selectbox("対象シートを選択", sheet_names)
-
-        if st.button("実行"):
+        selected_sheets = st.multiselect("対象シートを選択（複数可）", sheet_names)
+        
+        if st.button("実行") and selected_sheets:
             with open(FMT_PATH, "rb") as f:
                 fmt_bytes = f.read()
 
             output, sheet_count, total_days = build_workbook(
                 input_file.getvalue(),
                 fmt_bytes,
-                selected_sheet
+                selected_sheets
             )
-
             st.success(f"✅ 完成！ 媒体:{sheet_count} 日数:{total_days}")
             st.balloons()
 
             st.download_button(
                 "ダウンロード",
                 data=output,
-                file_name=f"転記用_{selected_sheet}.xlsx",
+                file_name="転記用_複数シート.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
 
