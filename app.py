@@ -93,8 +93,9 @@ def build_workbook(input_bytes, fmt_bytes, selected_sheets):
             # ヘッダー
             header_row = 1 + current_row_offset
             
-            out_ws.cell(row=header_row - 1, column=1).value = f"【{sheet_name} - {media}】"
-
+            out_ws.cell(row=header_row, column=1).value = f"【{sheet_name} - {media}】"
+            header_row += 1
+            
             for i, name in enumerate(campaigns):
                 out_ws.cell(row=header_row, column=7 + i).value = name
 
