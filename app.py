@@ -65,15 +65,24 @@ def parse_input(ws):
     return media_blocks
 
 
-def build_workbook(input_bytes, fmt_bytes, selected_sheet):
-    src_wb = openpyxl.load_workbook(io.BytesIO(input_bytes))
-    src_ws = src_wb[selected_sheet]
+def build_workbook(input_bytes, fmt_bytes, selected_sheets):
+    src_wb = openpyxl.load_workbook(io.BytesIO(input_bytes), data_only=True)
 
     out_wb = openpyxl.load_workbook(io.BytesIO(fmt_bytes))
     template_ws = out_wb.worksheets[0]
     out_wb.remove(template_ws)
 
-    media_blocks = parse_input(src_ws)
+    # 複数シート分を、媒体名ごとにマージする
+    media_blocks = {}
+
+    for selected_sheet in selected_sheets:
+        src_ws = src_wb[selected_sheet]
+        sheet_media_blocks = parse_input(src_ws)
+
+        for media, records in sheet_media_blocks.items():
+            if media not in media_blocks:
+                media_blocks[media] = []
+            media_blocks[media].extend(records)
 
     total_days = 0
     sheet_count = 0
@@ -279,27 +288,35 @@ with tab1:
         wb = openpyxl.load_workbook(input_file)
         sheet_names = wb.sheetnames
 
-        selected_sheet = st.selectbox("対象シートを選択", sheet_names)
+        selected_sheets = st.multiselect(
+            "対象シートを選択（複数選択可）",
+            sheet_names,
+            default=[sheet_names[0]] if sheet_names else []
+        )
 
         if st.button("実行"):
-            with open(FMT_PATH, "rb") as f:
-                fmt_bytes = f.read()
+            if not selected_sheets:
+                st.warning("対象シートを1つ以上選択してください")
+            else:
+                with open(FMT_PATH, "rb") as f:
+                    fmt_bytes = f.read()
 
-            output, sheet_count, total_days = build_workbook(
-                input_file.getvalue(),
-                fmt_bytes,
-                selected_sheet
-            )
+                output, sheet_count, total_days = build_workbook(
+                    input_file.getvalue(),
+                    fmt_bytes,
+                    selected_sheets
+                )
 
-            st.success(f"✅ 完成！ 媒体:{sheet_count} 日数:{total_days}")
-            st.balloons()
+                st.success(f"✅ 完成！ 媒体:{sheet_count} 日数:{total_days}")
+                st.balloons()
 
-            st.download_button(
-                "ダウンロード",
-                data=output,
-                file_name=f"転記用_{selected_sheet}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+                today_str = datetime.now().strftime("%Y%m%d")
+                st.download_button(
+                    "ダウンロード",
+                    data=output,
+                    file_name=f"転記用_{today_str}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
 
 
 with tab2:
