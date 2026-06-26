@@ -100,7 +100,7 @@ def build_workbook(input_bytes, fmt_bytes, selected_sheets):
     変更点：
     - 元データ側は複数シート選択可能
     - 選択した複数シートの内容を媒体名ごとに統合
-    - 出力側は媒体ごとにシート分け
+    - 出力側は従来どおり媒体ごとにシート分け
     """
     src_wb = openpyxl.load_workbook(io.BytesIO(input_bytes), data_only=True)
 
@@ -184,8 +184,8 @@ from sklearn.metrics import mean_squared_error, r2_score
 from openpyxl.chart import BarChart, Reference
 from openpyxl.utils import get_column_letter
 
-TARGET_COL_NAME = "cv"          # 目的変数。通常はCV
-FEATURE_START_COL_IDX = 6       # G列以降を施策フラグとして扱う（0始まりなので6）
+DEFAULT_TARGET_COL_NAME = "cv"          # 目的変数。通常はCV
+DEFAULT_FEATURE_START_COL_IDX = 6       # G列以降を施策フラグとして扱う（0始まりなので6）
 RIDGE_ALPHAS = np.logspace(-3, 3, 30)
 
 
@@ -223,6 +223,95 @@ def auto_fit_columns(ws, max_width=60):
             max_len = max(max_len, len(str(cell.value)))
         ws.column_dimensions[col_letter].width = min(max_len + 2, max_width)
 
+
+
+
+def column_label(idx):
+    """0始まりの列番号を、Excel風の列名付きラベルにする。"""
+    return f"{get_column_letter(idx + 1)}列：{idx + 1}列目"
+
+
+def get_default_target_col(columns):
+    """目的変数の初期値。cv列があればcv、なければD列。"""
+    cols = list(columns)
+    for c in cols:
+        if str(c).strip().lower() == "cv":
+            return c
+    if len(cols) >= 4:
+        return cols[3]
+    return cols[0] if cols else None
+
+
+def make_regression_precheck(input_bytes, selected_sheets, target_col_name, feature_start_col_idx):
+    """実行前に、シートごとの解析可否をざっくり確認してStreamlitに表示するための表を作る。"""
+    xls = pd.ExcelFile(io.BytesIO(input_bytes))
+    rows = []
+
+    for sheet in selected_sheets:
+        df = pd.read_excel(xls, sheet_name=sheet)
+
+        if target_col_name in df.columns:
+            y_raw = df[target_col_name]
+            target_used = str(target_col_name)
+        elif len(df.columns) >= 4:
+            y_raw = df.iloc[:, 3]
+            target_used = str(df.columns[3]) + "（D列 fallback）"
+        else:
+            rows.append({
+                "シート": sheet,
+                "判定": "🔴不可",
+                "目的変数": "なし",
+                "観測数": 0,
+                "施策列数": 0,
+                "変化あり施策数": 0,
+                "コメント": "目的変数に使える列がありません",
+            })
+            continue
+
+        if df.shape[1] <= feature_start_col_idx:
+            rows.append({
+                "シート": sheet,
+                "判定": "🔴不可",
+                "目的変数": target_used,
+                "観測数": int(pd.to_numeric(y_raw, errors="coerce").notna().sum()),
+                "施策列数": 0,
+                "変化あり施策数": 0,
+                "コメント": "指定した開始列以降に施策列がありません",
+            })
+            continue
+
+        y = pd.to_numeric(y_raw, errors="coerce")
+        X = df.iloc[:, feature_start_col_idx:].copy().apply(pd.to_numeric, errors="coerce").fillna(0)
+        valid = y.notna()
+        X_valid = X.loc[valid]
+        variable_cols = [c for c in X_valid.columns if X_valid[c].nunique(dropna=False) > 1]
+        obs = int(valid.sum())
+        p = len(variable_cols)
+
+        if obs < 5:
+            judge = "🔴不可"
+            comment = "観測数が少なすぎます"
+        elif p == 0:
+            judge = "🔴不可"
+            comment = "変化のある施策列がありません"
+        elif obs <= p + 1:
+            judge = "🟡注意"
+            comment = "施策数に対して観測数が少なめです"
+        else:
+            judge = "🟢OK"
+            comment = "解析可能です"
+
+        rows.append({
+            "シート": sheet,
+            "判定": judge,
+            "目的変数": target_used,
+            "観測数": obs,
+            "施策列数": int(X.shape[1]),
+            "変化あり施策数": p,
+            "コメント": comment,
+        })
+
+    return pd.DataFrame(rows)
 
 def confidence_label(on_days, total_days, abs_std_coef, corr_max):
     """
@@ -283,20 +372,20 @@ def make_action_comment(row):
     return "プラス推定かつ比較的評価しやすい施策です。継続/優先候補です。"
 
 
-def prepare_ridge_data(df):
+def prepare_ridge_data(df, target_col_name=DEFAULT_TARGET_COL_NAME, feature_start_col_idx=DEFAULT_FEATURE_START_COL_IDX):
     """1シート分のデータから、CVと施策フラグを取り出して学習用データを作る。"""
-    if df.shape[1] <= FEATURE_START_COL_IDX:
+    if df.shape[1] <= feature_start_col_idx:
         return None, "G列以降の施策列がありません"
 
     # 目的変数は cv 列優先。なければ従来どおりD列。
-    if TARGET_COL_NAME in df.columns:
-        y_raw = df[TARGET_COL_NAME]
-        target_name = TARGET_COL_NAME
+    if target_col_name in df.columns:
+        y_raw = df[target_col_name]
+        target_name = str(target_col_name)
     else:
         y_raw = df.iloc[:, 3]
         target_name = str(df.columns[3])
 
-    X_raw = df.iloc[:, FEATURE_START_COL_IDX:].copy()
+    X_raw = df.iloc[:, feature_start_col_idx:].copy()
     X_raw.columns = [str(c) for c in X_raw.columns]
 
     # 数値化。'-' や空欄は NaN 扱い。
@@ -421,8 +510,8 @@ def calc_correlation_matrix(X):
     return X.corr().fillna(0)
 
 
-def ridge_analyze_one_sheet(df):
-    prepared, error = prepare_ridge_data(df)
+def ridge_analyze_one_sheet(df, target_col_name=DEFAULT_TARGET_COL_NAME, feature_start_col_idx=DEFAULT_FEATURE_START_COL_IDX, corr_threshold=0.70):
+    prepared, error = prepare_ridge_data(df, target_col_name, feature_start_col_idx)
     if error:
         return None, error
 
@@ -525,7 +614,7 @@ def ridge_analyze_one_sheet(df):
         "除外した変化なし施策数": len(prepared["removed_cols"]),
     }
 
-    corr_pairs = calc_correlation_pairs(X, threshold=0.70)
+    corr_pairs = calc_correlation_pairs(X, threshold=corr_threshold)
     corr_matrix = calc_correlation_matrix(X)
 
     return {
@@ -851,7 +940,7 @@ def write_diagnosis_report(ws, sheet_name, result):
     auto_fit_columns(ws, max_width=60)
 
 
-def run_regression_all_sheets(input_bytes):
+def run_regression_all_sheets(input_bytes, selected_sheets=None, target_col_name=DEFAULT_TARGET_COL_NAME, feature_start_col_idx=DEFAULT_FEATURE_START_COL_IDX, corr_threshold=0.70):
     xls = pd.ExcelFile(io.BytesIO(input_bytes))
 
     wb = openpyxl.Workbook()
@@ -860,9 +949,12 @@ def run_regression_all_sheets(input_bytes):
     created = 0
     summary_rows = []
 
-    for sheet in xls.sheet_names:
+    if selected_sheets is None:
+        selected_sheets = xls.sheet_names
+
+    for sheet in selected_sheets:
         df = pd.read_excel(xls, sheet_name=sheet)
-        result, error = ridge_analyze_one_sheet(df)
+        result, error = ridge_analyze_one_sheet(df, target_col_name, feature_start_col_idx, corr_threshold)
 
         if error:
             summary_rows.append({
@@ -994,20 +1086,107 @@ with tab1:
 
 with tab2:
     st.title("回帰分析ツール")
+    st.caption("CV予測・施策ランキング・相関注意・診断レポートをまとめて出力します。")
+
+    with st.expander("このタブで出力されるもの", expanded=False):
+        st.markdown(
+            """
+            - **全体サマリー**：媒体ごとのR2、RMSE、おすすめ施策
+            - **診断シート**：営業向けの優先候補・解釈注意・相関注意
+            - **評価シート**：施策ごとの影響度、推定CV差分、ON日数、信頼度
+            - **予測シート**：実績CVと予測CVの比較
+            - **相関シート**：同時実施が多い施策ペア
+            """
+        )
 
     reg_file = st.file_uploader("回帰分析用ファイルをアップロード", type=["xlsx"], key="reg")
 
     if reg_file:
-        if st.button("回帰分析実行"):
+        reg_bytes = reg_file.getvalue()
+        xls = pd.ExcelFile(io.BytesIO(reg_bytes))
+        sheet_names = xls.sheet_names
 
-            result = run_regression_all_sheets(reg_file.getvalue())
-            today_str = datetime.now().strftime("%Y%m%d")
+        st.subheader("1. 分析対象を選択")
+        selected_reg_sheets = st.multiselect(
+            "分析するシート",
+            sheet_names,
+            default=sheet_names,
+            help="不要なシートがある場合は外してください。"
+        )
+
+        preview_sheet = selected_reg_sheets[0] if selected_reg_sheets else sheet_names[0]
+        preview_df = pd.read_excel(xls, sheet_name=preview_sheet, nrows=5)
+        columns = list(preview_df.columns)
+
+        default_target = get_default_target_col(columns)
+        default_target_idx = columns.index(default_target) if default_target in columns else 0
+
+        col1, col2 = st.columns(2)
+        with col1:
+            target_col = st.selectbox(
+                "目的変数（Y）",
+                columns,
+                index=default_target_idx,
+                help="通常は cv を選びます。cv列がない場合はD列が初期選択されます。"
+            )
+        with col2:
+            feature_start_label = st.selectbox(
+                "施策列の開始位置（X）",
+                [column_label(i) for i in range(len(columns))],
+                index=min(DEFAULT_FEATURE_START_COL_IDX, len(columns) - 1),
+                help="通常はG列以降を施策フラグとして扱います。"
+            )
+            feature_start_idx = int(feature_start_label.split("列：")[1].replace("列目", "")) - 1
+
+        with st.expander("詳細設定", expanded=False):
+            corr_threshold = st.slider(
+                "相関注意として出力する閾値",
+                min_value=0.50,
+                max_value=0.95,
+                value=0.70,
+                step=0.05,
+                help="低くすると注意ペアが多く出ます。通常は0.70でOKです。"
+            )
+            st.info("リッジ回帰のαは自動選択です。まずは変更不要です。")
+
+        st.subheader("2. 実行前チェック")
+        if selected_reg_sheets:
+            precheck_df = make_regression_precheck(reg_bytes, selected_reg_sheets, target_col, feature_start_idx)
+            st.dataframe(precheck_df, use_container_width=True)
+
+            ok_count = int(precheck_df["判定"].astype(str).str.contains("OK").sum())
+            warn_count = int(precheck_df["判定"].astype(str).str.contains("注意").sum())
+            ng_count = int(precheck_df["判定"].astype(str).str.contains("不可").sum())
+
+            m1, m2, m3 = st.columns(3)
+            m1.metric("解析OK", ok_count)
+            m2.metric("注意", warn_count)
+            m3.metric("不可", ng_count)
+        else:
+            st.warning("分析するシートを1つ以上選択してください。")
+
+        with st.expander("アップロードデータの先頭5行プレビュー", expanded=False):
+            st.caption(f"プレビュー対象：{preview_sheet}")
+            st.dataframe(preview_df, use_container_width=True)
+
+        st.subheader("3. 回帰分析を実行")
+        run_disabled = not selected_reg_sheets
+        if st.button("回帰分析実行", type="primary", disabled=run_disabled):
+            with st.spinner("分析中です。Excelレポートを作成しています..."):
+                result = run_regression_all_sheets(
+                    reg_bytes,
+                    selected_sheets=selected_reg_sheets,
+                    target_col_name=target_col,
+                    feature_start_col_idx=feature_start_idx,
+                    corr_threshold=corr_threshold,
+                )
+                today_str = datetime.now().strftime("%Y%m%d")
 
             st.success("✅ 回帰分析完了！")
             st.balloons()
 
             st.download_button(
-                "ダウンロード",
+                "分析結果をダウンロード",
                 data=result,
                 file_name=f"回帰分析結果_{today_str}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
