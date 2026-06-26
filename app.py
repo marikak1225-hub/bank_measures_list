@@ -199,6 +199,41 @@ def confidence_label(on_days, total_days, abs_std_coef, corr_max):
         return "🟡中", "影響度は小さめです"
     return "🟢高", "比較的評価しやすい施策です"
 
+def confidence_score(label):
+    """おすすめスコア用に、信頼度を数値化する。"""
+    if str(label).startswith("🟢"):
+        return 1.0
+    if str(label).startswith("🟡"):
+        return 0.6
+    return 0.25
+
+
+def star_rating(score, max_score):
+    """おすすめスコアを★1〜5に変換する。"""
+    if max_score <= 0 or score <= 0:
+        return "☆☆☆☆☆"
+    ratio = score / max_score
+    if ratio >= 0.80:
+        return "★★★★★"
+    if ratio >= 0.60:
+        return "★★★★☆"
+    if ratio >= 0.40:
+        return "★★★☆☆"
+    if ratio >= 0.20:
+        return "★★☆☆☆"
+    return "★☆☆☆☆"
+
+
+def make_action_comment(row):
+    """営業向けの短い診断コメント。"""
+    if row["推定CV差分_0to1"] <= 0:
+        return "CV増加方向の効果は弱め/マイナス推定です。優先度は低めです。"
+    if str(row["信頼度"]).startswith("🔴"):
+        return "効果は大きく見えますが、データ条件が弱いため参考値です。追加データで再確認推奨です。"
+    if str(row["信頼度"]).startswith("🟡"):
+        return "プラス推定ですが、同時実施やON日数の偏りがあるため解釈注意です。"
+    return "プラス推定かつ比較的評価しやすい施策です。継続/優先候補です。"
+
 
 def prepare_ridge_data(df):
     """1シート分のデータから、CVと施策フラグを取り出して学習用データを作る。"""
@@ -407,7 +442,28 @@ def ridge_analyze_one_sheet(df):
             "コメント": comment,
         })
 
-    ranking = pd.DataFrame(rows).sort_values("影響度_abs", ascending=False).reset_index(drop=True)
+    ranking = pd.DataFrame(rows)
+
+    # 寄与度：係数の絶対値を全施策合計で割った比較用スコア。
+    # 「何%貢献した」と断定するものではなく、モデル上の相対的な重要度として使う。
+    total_abs = ranking["影響度_abs"].sum() if len(ranking) else 0
+    if total_abs > 0:
+        ranking["寄与度_%"] = ranking["影響度_abs"] / total_abs
+    else:
+        ranking["寄与度_%"] = 0
+
+    # 平均寄与CV：推定CV差分 × ON率。
+    # 施策が実際にONだった頻度込みで、期間平均にどの程度乗っていそうかの目安。
+    ranking["平均寄与CV"] = ranking["推定CV差分_0to1"] * ranking["ON率"]
+
+    # おすすめスコア：プラス方向の推定効果 × 信頼度。営業向けの優先順位作成用。
+    ranking["信頼係数"] = ranking["信頼度"].apply(confidence_score)
+    ranking["おすすめスコア"] = ranking["推定CV差分_0to1"].clip(lower=0) * ranking["信頼係数"]
+    max_reco_score = ranking["おすすめスコア"].max() if len(ranking) else 0
+    ranking["おすすめ度"] = ranking["おすすめスコア"].apply(lambda x: star_rating(float(x), float(max_reco_score)))
+    ranking["診断コメント"] = ranking.apply(make_action_comment, axis=1)
+
+    ranking = ranking.sort_values("影響度_abs", ascending=False).reset_index(drop=True)
     ranking.insert(0, "順位", ranking.index + 1)
 
     metrics = {
@@ -470,8 +526,9 @@ def write_ridge_result(ws, sheet_name, result):
     ws.cell(start_row, 1).font = Font(bold=True)
 
     headers = [
-        "順位", "施策", "標準化影響度", "影響度_abs", "推定CV差分_0to1",
-        "方向", "ON日数", "ON率", "他施策との最大相関", "信頼度", "コメント"
+        "順位", "施策", "標準化影響度", "影響度_abs", "寄与度_%", "推定CV差分_0to1",
+        "平均寄与CV", "方向", "ON日数", "ON率", "他施策との最大相関",
+        "信頼度", "おすすめ度", "おすすめスコア", "コメント", "診断コメント"
     ]
 
     for col_idx, h in enumerate(headers, 1):
@@ -489,11 +546,14 @@ def write_ridge_result(ws, sheet_name, result):
 
     # 表示形式
     for r in range(start_row + 2, start_row + 2 + len(ranking)):
-        ws.cell(r, 3).number_format = "0.000"
-        ws.cell(r, 4).number_format = "0.000"
-        ws.cell(r, 5).number_format = "0.000"
-        ws.cell(r, 8).number_format = "0.0%"
-        ws.cell(r, 9).number_format = "0.000"
+        ws.cell(r, 3).number_format = "0.000"      # 標準化影響度
+        ws.cell(r, 4).number_format = "0.000"      # 影響度_abs
+        ws.cell(r, 5).number_format = "0.0%"       # 寄与度_%
+        ws.cell(r, 6).number_format = "0.000"      # 推定CV差分
+        ws.cell(r, 7).number_format = "0.000"      # 平均寄与CV
+        ws.cell(r, 10).number_format = "0.0%"      # ON率
+        ws.cell(r, 11).number_format = "0.000"     # 最大相関
+        ws.cell(r, 14).number_format = "0.000"     # おすすめスコア
 
     # 棒グラフ：上位10件
     if len(ranking) > 0:
@@ -624,6 +684,125 @@ def write_correlation_sheet(ws, sheet_name, result):
     auto_fit_columns(ws, max_width=40)
 
 
+def write_diagnosis_report(ws, sheet_name, result):
+    """営業・マネージャー向けの診断レポートを作る。"""
+    ranking = result["ranking"].copy()
+    metrics = result["metrics"]
+    corr_pairs = result.get("correlation_pairs", pd.DataFrame())
+
+    ws["A1"] = f"施策診断レポート：{sheet_name}"
+    ws["A1"].font = Font(bold=True, size=14)
+
+    ws["A3"] = "このシートの目的"
+    ws["A3"].font = Font(bold=True)
+    ws["A4"] = "CV予測モデルの結果から、優先候補・注意点・解釈上の制約を営業向けに要約します。"
+    ws["A5"] = "※統計的な有意差検定ではなく、モデル上の影響度・ON日数・相関を組み合わせた実務判断用です。"
+
+    ws["A7"] = "モデル精度"
+    ws["A7"].font = Font(bold=True)
+    metric_rows = [
+        ("R2", metrics.get("R2")),
+        ("RMSE", metrics.get("RMSE")),
+        ("Best Alpha", metrics.get("Best Alpha")),
+        ("観測数", metrics.get("観測数")),
+        ("施策数", metrics.get("施策数")),
+    ]
+    for i, (k, v) in enumerate(metric_rows, 8):
+        ws.cell(i, 1).value = k
+        ws.cell(i, 2).value = v
+        ws.cell(i, 1).border = thin
+        ws.cell(i, 2).border = thin
+
+    # 推奨候補：プラス推定かつおすすめスコア順
+    reco = ranking[ranking["推定CV差分_0to1"] > 0].sort_values("おすすめスコア", ascending=False).head(10)
+    start = 15
+    ws.cell(start, 1).value = "優先候補ランキング"
+    ws.cell(start, 1).font = Font(bold=True)
+    headers = ["順位", "施策", "おすすめ度", "推定CV差分_0to1", "寄与度_%", "信頼度", "ON日数", "他施策との最大相関", "診断コメント"]
+    for c, h in enumerate(headers, 1):
+        cell = ws.cell(start + 1, c)
+        cell.value = h
+        cell.font = Font(bold=True)
+        cell.border = thin
+
+    if reco.empty:
+        ws.cell(start + 2, 1).value = "プラス方向で推奨できる施策は見つかりませんでした。"
+    else:
+        for r_idx, (_, r) in enumerate(reco.iterrows(), start + 2):
+            vals = [r_idx - start - 1, r["施策"], r["おすすめ度"], r["推定CV差分_0to1"], r["寄与度_%"], r["信頼度"], r["ON日数"], r["他施策との最大相関"], r["診断コメント"]]
+            for c_idx, v in enumerate(vals, 1):
+                cell = ws.cell(r_idx, c_idx)
+                cell.value = v
+                cell.border = thin
+            ws.cell(r_idx, 4).number_format = "0.000"
+            ws.cell(r_idx, 5).number_format = "0.0%"
+            ws.cell(r_idx, 8).number_format = "0.000"
+
+    # 注意施策：係数は大きいが信頼度が低い/中のもの
+    caution = ranking[
+        (ranking["影響度_abs"] > 0) &
+        (~ranking["信頼度"].astype(str).str.startswith("🟢"))
+    ].sort_values("影響度_abs", ascending=False).head(10)
+    caution_start = start + 5 + max(len(reco), 1)
+    ws.cell(caution_start, 1).value = "解釈注意ランキング"
+    ws.cell(caution_start, 1).font = Font(bold=True)
+    caution_headers = ["施策", "影響度_abs", "推定CV差分_0to1", "信頼度", "ON日数", "ON率", "他施策との最大相関", "コメント"]
+    for c, h in enumerate(caution_headers, 1):
+        cell = ws.cell(caution_start + 1, c)
+        cell.value = h
+        cell.font = Font(bold=True)
+        cell.border = thin
+
+    if caution.empty:
+        ws.cell(caution_start + 2, 1).value = "大きな注意対象は見つかりませんでした。"
+    else:
+        for r_idx, (_, r) in enumerate(caution.iterrows(), caution_start + 2):
+            vals = [r["施策"], r["影響度_abs"], r["推定CV差分_0to1"], r["信頼度"], r["ON日数"], r["ON率"], r["他施策との最大相関"], r["コメント"]]
+            for c_idx, v in enumerate(vals, 1):
+                cell = ws.cell(r_idx, c_idx)
+                cell.value = v
+                cell.border = thin
+            ws.cell(r_idx, 2).number_format = "0.000"
+            ws.cell(r_idx, 3).number_format = "0.000"
+            ws.cell(r_idx, 6).number_format = "0.0%"
+            ws.cell(r_idx, 7).number_format = "0.000"
+
+    # 相関注意サマリー
+    corr_start = caution_start + 5 + max(len(caution), 1)
+    ws.cell(corr_start, 1).value = "同時実施の注意"
+    ws.cell(corr_start, 1).font = Font(bold=True)
+    if corr_pairs.empty:
+        ws.cell(corr_start + 1, 1).value = "相関0.70以上の施策ペアはありませんでした。"
+    else:
+        high = corr_pairs[corr_pairs["相関"].abs() >= 0.90]
+        mid = corr_pairs[(corr_pairs["相関"].abs() >= 0.70) & (corr_pairs["相関"].abs() < 0.90)]
+        ws.cell(corr_start + 1, 1).value = f"相関0.90以上：{len(high)}ペア / 相関0.70以上0.90未満：{len(mid)}ペア"
+        ws.cell(corr_start + 2, 1).value = "相関が高い施策は、ランキング上位でも単独効果としては断定しないでください。"
+
+    # 棒グラフ：おすすめスコア上位
+    if not reco.empty:
+        chart = BarChart()
+        chart.type = "bar"
+        chart.title = "おすすめスコア上位"
+        chart.y_axis.title = "施策"
+        chart.x_axis.title = "推定CV差分×信頼度"
+        max_items = min(10, len(reco))
+        # 診断レポート上におすすめスコア作業列を置く
+        work_col = 11
+        ws.cell(start + 1, work_col).value = "おすすめスコア"
+        for idx, (_, r) in enumerate(reco.head(max_items).iterrows(), start + 2):
+            ws.cell(idx, work_col).value = float(r["おすすめスコア"])
+        data = Reference(ws, min_col=work_col, min_row=start + 1, max_row=start + 1 + max_items)
+        cats = Reference(ws, min_col=2, min_row=start + 2, max_row=start + 1 + max_items)
+        chart.add_data(data, titles_from_data=True)
+        chart.set_categories(cats)
+        chart.height = 8
+        chart.width = 18
+        ws.add_chart(chart, "K15")
+
+    auto_fit_columns(ws, max_width=60)
+
+
 def run_regression_all_sheets(input_bytes):
     xls = pd.ExcelFile(io.BytesIO(input_bytes))
 
@@ -645,7 +824,11 @@ def run_regression_all_sheets(input_bytes):
                 "R2": None,
                 "RMSE": None,
                 "Best Alpha": None,
-                "上位施策": None,
+                "影響度トップ施策": None,
+                "おすすめ施策": None,
+                "おすすめスコア": None,
+                "相関_高ペア数": None,
+                "相関_中ペア数": None,
             })
             continue
 
@@ -658,10 +841,17 @@ def run_regression_all_sheets(input_bytes):
         corr_ws = wb.create_sheet(make_unique_sheet_name(wb, sheet[:28] + "_相関"))
         write_correlation_sheet(corr_ws, sheet, result)
 
+        report_ws = wb.create_sheet(make_unique_sheet_name(wb, sheet[:28] + "_診断"))
+        write_diagnosis_report(report_ws, sheet, result)
+
         top_strategy = result["ranking"].iloc[0]["施策"] if len(result["ranking"]) else None
         corr_pairs = result.get("correlation_pairs", pd.DataFrame())
         high_corr_count = int((corr_pairs["相関"].abs() >= 0.90).sum()) if not corr_pairs.empty else 0
         mid_corr_count = int(((corr_pairs["相関"].abs() >= 0.70) & (corr_pairs["相関"].abs() < 0.90)).sum()) if not corr_pairs.empty else 0
+
+        reco_df = result["ranking"][result["ranking"]["推定CV差分_0to1"] > 0].sort_values("おすすめスコア", ascending=False)
+        recommended_strategy = reco_df.iloc[0]["施策"] if len(reco_df) else None
+        recommended_score = float(reco_df.iloc[0]["おすすめスコア"]) if len(reco_df) else None
 
         summary_rows.append({
             "媒体/シート": sheet,
@@ -670,7 +860,9 @@ def run_regression_all_sheets(input_bytes):
             "R2": result["metrics"]["R2"],
             "RMSE": result["metrics"]["RMSE"],
             "Best Alpha": result["metrics"]["Best Alpha"],
-            "上位施策": top_strategy,
+            "影響度トップ施策": top_strategy,
+            "おすすめ施策": recommended_strategy,
+            "おすすめスコア": recommended_score,
             "相関_高ペア数": high_corr_count,
             "相関_中ペア数": mid_corr_count,
         })
