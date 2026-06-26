@@ -64,18 +64,66 @@ def parse_input(ws):
     return media_blocks
 
 
-def build_workbook(input_bytes, fmt_bytes, selected_sheet):
-    src_wb = openpyxl.load_workbook(io.BytesIO(input_bytes))
-    src_ws = src_wb[selected_sheet]
+def safe_sheet_title(title, used_titles):
+    """Excelのシート名制限に合わせて、重複しないシート名を作る。"""
+    invalid_chars = ['\\', '/', '*', '[', ']', ':', '?']
+    safe_title = str(title)
+    for ch in invalid_chars:
+        safe_title = safe_title.replace(ch, '_')
+
+    safe_title = safe_title[:31] or 'Sheet'
+    base = safe_title
+    idx = 2
+
+    while safe_title in used_titles:
+        suffix = f'_{idx}'
+        safe_title = base[:31 - len(suffix)] + suffix
+        idx += 1
+
+    used_titles.add(safe_title)
+    return safe_title
+
+
+def merge_media_blocks(base_blocks, add_blocks):
+    """複数の元データシートから取得した媒体ブロックを、媒体名ごとに合算する。"""
+    for media, records in add_blocks.items():
+        if media not in base_blocks:
+            base_blocks[media] = []
+        base_blocks[media].extend(records)
+    return base_blocks
+
+
+def build_workbook(input_bytes, fmt_bytes, selected_sheets):
+    """
+    転記用エクセルを生成する。
+
+    変更点：
+    - 元データ側は複数シート選択可能
+    - 選択した複数シートの内容を媒体名ごとに統合
+    - 出力側は従来どおり媒体ごとにシート分け
+    """
+    src_wb = openpyxl.load_workbook(io.BytesIO(input_bytes), data_only=True)
+
+    if isinstance(selected_sheets, str):
+        selected_sheets = [selected_sheets]
 
     out_wb = openpyxl.load_workbook(io.BytesIO(fmt_bytes))
     template_ws = out_wb.worksheets[0]
     out_wb.remove(template_ws)
 
-    media_blocks = parse_input(src_ws)
+    media_blocks = {}
+
+    for sheet_name in selected_sheets:
+        if sheet_name not in src_wb.sheetnames:
+            continue
+
+        src_ws = src_wb[sheet_name]
+        sheet_blocks = parse_input(src_ws)
+        merge_media_blocks(media_blocks, sheet_blocks)
 
     total_days = 0
     sheet_count = 0
+    used_titles = set()
 
     for media, records in media_blocks.items():
 
@@ -83,7 +131,7 @@ def build_workbook(input_bytes, fmt_bytes, selected_sheet):
             continue
 
         ws = out_wb.copy_worksheet(template_ws)
-        ws.title = media[:31]
+        ws.title = safe_sheet_title(media, used_titles)
         sheet_count += 1
 
         campaigns = sorted(set(r["name"] for r in records))
@@ -907,30 +955,41 @@ with tab1:
     input_file = st.file_uploader("施策一覧をアップロード", type=["xlsx"])
 
     if input_file:
-        wb = openpyxl.load_workbook(input_file)
+        wb = openpyxl.load_workbook(input_file, read_only=True)
         sheet_names = wb.sheetnames
 
-        selected_sheet = st.selectbox("対象シートを選択", sheet_names)
+        selected_sheets = st.multiselect(
+            "対象シートを選択（複数選択可）",
+            sheet_names,
+            default=sheet_names[:1]
+        )
+
+        st.caption("選択した元データシートをまとめて読み込み、出力ファイルは従来どおり媒体ごとにシート分けします。")
 
         if st.button("実行"):
-            with open(FMT_PATH, "rb") as f:
-                fmt_bytes = f.read()
+            if not selected_sheets:
+                st.warning("対象シートを1つ以上選択してください。")
+            else:
+                with open(FMT_PATH, "rb") as f:
+                    fmt_bytes = f.read()
 
-            output, sheet_count, total_days = build_workbook(
-                input_file.getvalue(),
-                fmt_bytes,
-                selected_sheet
-            )
+                output, sheet_count, total_days = build_workbook(
+                    input_file.getvalue(),
+                    fmt_bytes,
+                    selected_sheets
+                )
 
-            st.success(f"✅ 完成！ 媒体:{sheet_count} 日数:{total_days}")
-            st.balloons()
+                today_str = datetime.now().strftime("%Y%m%d")
 
-            st.download_button(
-                "ダウンロード",
-                data=output,
-                file_name=f"転記用_{selected_sheet}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+                st.success(f"✅ 完成！ 選択シート:{len(selected_sheets)} 媒体:{sheet_count} 日数:{total_days}")
+                st.balloons()
+
+                st.download_button(
+                    "ダウンロード",
+                    data=output,
+                    file_name=f"転記用_{today_str}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
 
 
 with tab2:
