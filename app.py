@@ -1147,7 +1147,7 @@ with tab2:
                 step=0.05,
                 help="低くすると注意ペアが多く出ます。通常は0.70でOKです。"
             )
-            st.info("リッジ回帰のαは自動選択です。まずは変更不要です。")
+            st.info("リッジ回帰のαは自動選択です")
 
         st.subheader("2. 実行前チェック")
         if selected_reg_sheets:
