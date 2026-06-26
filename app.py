@@ -100,7 +100,7 @@ def build_workbook(input_bytes, fmt_bytes, selected_sheets):
     変更点：
     - 元データ側は複数シート選択可能
     - 選択した複数シートの内容を媒体名ごとに統合
-    - 出力側は従来どおり媒体ごとにシート分け
+    - 出力側は媒体ごとにシート分け
     """
     src_wb = openpyxl.load_workbook(io.BytesIO(input_bytes), data_only=True)
 
