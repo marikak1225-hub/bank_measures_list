@@ -262,6 +262,82 @@ def calc_max_corr(X):
     return result
 
 
+def calc_correlation_pairs(X, threshold=0.70):
+    """
+    施策同士の相関が高い組み合わせを一覧化する。
+    0/1フラグ同士の相関なので、同時にON/OFFになりやすい施策の検知に使う。
+    """
+    if X.shape[1] <= 1:
+        return pd.DataFrame(columns=[
+            "施策A", "施策B", "相関", "同時ON日数", "A_ON日数", "B_ON日数",
+            "A_ON時_BもON率", "B_ON時_AもON率", "注意度", "コメント"
+        ])
+
+    corr = X.corr().fillna(0)
+    rows = []
+    cols = list(X.columns)
+    total_days = len(X)
+
+    for i in range(len(cols)):
+        for j in range(i + 1, len(cols)):
+            a = cols[i]
+            b = cols[j]
+            corr_val = float(corr.loc[a, b])
+            abs_corr = abs(corr_val)
+
+            a_on = int((X[a] != 0).sum())
+            b_on = int((X[b] != 0).sum())
+            both_on = int(((X[a] != 0) & (X[b] != 0)).sum())
+
+            a_given_b = both_on / a_on if a_on else 0
+            b_given_a = both_on / b_on if b_on else 0
+
+            if abs_corr >= 0.90:
+                level = "🔴高"
+                comment = "ほぼセットで動いているため、単独効果の分離はかなり困難です"
+            elif abs_corr >= 0.70:
+                level = "🟡中"
+                comment = "同時実施傾向が強く、係数解釈には注意が必要です"
+            else:
+                level = "🟢低"
+                comment = "強い同時実施傾向は見られません"
+
+            if abs_corr >= threshold:
+                rows.append({
+                    "施策A": a,
+                    "施策B": b,
+                    "相関": corr_val,
+                    "同時ON日数": both_on,
+                    "A_ON日数": a_on,
+                    "B_ON日数": b_on,
+                    "A_ON時_BもON率": a_given_b,
+                    "B_ON時_AもON率": b_given_a,
+                    "注意度": level,
+                    "コメント": comment,
+                })
+
+    if not rows:
+        return pd.DataFrame(columns=[
+            "施策A", "施策B", "相関", "同時ON日数", "A_ON日数", "B_ON日数",
+            "A_ON時_BもON率", "B_ON時_AもON率", "注意度", "コメント"
+        ])
+
+    return (
+        pd.DataFrame(rows)
+        .assign(相関_abs=lambda d: d["相関"].abs())
+        .sort_values("相関_abs", ascending=False)
+        .drop(columns=["相関_abs"])
+        .reset_index(drop=True)
+    )
+
+
+def calc_correlation_matrix(X):
+    """施策同士の相関行列。Excel出力用。"""
+    if X.shape[1] <= 1:
+        return pd.DataFrame()
+    return X.corr().fillna(0)
+
+
 def ridge_analyze_one_sheet(df):
     prepared, error = prepare_ridge_data(df)
     if error:
@@ -345,10 +421,15 @@ def ridge_analyze_one_sheet(df):
         "除外した変化なし施策数": len(prepared["removed_cols"]),
     }
 
+    corr_pairs = calc_correlation_pairs(X, threshold=0.70)
+    corr_matrix = calc_correlation_matrix(X)
+
     return {
         "metrics": metrics,
         "ranking": ranking,
         "removed_cols": prepared["removed_cols"],
+        "correlation_pairs": corr_pairs,
+        "correlation_matrix": corr_matrix,
         "y_actual": y,
         "y_pred": y_pred,
     }, None
@@ -466,6 +547,83 @@ def write_prediction_sheet(ws, sheet_name, result):
     auto_fit_columns(ws)
 
 
+def write_correlation_sheet(ws, sheet_name, result):
+    """施策同士の相関が高い組み合わせを出力する。"""
+    ws["A1"] = f"施策相関チェック：{sheet_name}"
+    ws["A1"].font = Font(bold=True, size=14)
+
+    ws["A3"] = "読み方"
+    ws["A3"].font = Font(bold=True)
+    notes = [
+        "相関が高い施策ペアは、同じタイミングでON/OFFになりやすい組み合わせです。",
+        "相関が高い場合、CV増減がどちらの施策によるものか分離しづらくなります。",
+        "🔴高はほぼセット実施、🟡中は解釈注意の目安です。",
+        "このシートは『施策の優位性ランキングをどこまで信じてよいか』の補助資料です。",
+    ]
+    for i, note in enumerate(notes, 4):
+        ws.cell(i, 1).value = note
+
+    pairs = result.get("correlation_pairs", pd.DataFrame())
+
+    start_row = 10
+    ws.cell(start_row, 1).value = "相関が高い施策ペア（|相関| >= 0.70）"
+    ws.cell(start_row, 1).font = Font(bold=True)
+
+    headers = [
+        "施策A", "施策B", "相関", "同時ON日数", "A_ON日数", "B_ON日数",
+        "A_ON時_BもON率", "B_ON時_AもON率", "注意度", "コメント"
+    ]
+
+    for c, h in enumerate(headers, 1):
+        cell = ws.cell(start_row + 1, c)
+        cell.value = h
+        cell.font = Font(bold=True)
+        cell.border = thin
+
+    if pairs.empty:
+        ws.cell(start_row + 2, 1).value = "強い相関のある施策ペアは見つかりませんでした"
+    else:
+        for r_idx, (_, r) in enumerate(pairs.iterrows(), start_row + 2):
+            for c_idx, h in enumerate(headers, 1):
+                cell = ws.cell(r_idx, c_idx)
+                cell.value = r[h]
+                cell.border = thin
+
+        for r in range(start_row + 2, start_row + 2 + len(pairs)):
+            ws.cell(r, 3).number_format = "0.000"
+            ws.cell(r, 7).number_format = "0.0%"
+            ws.cell(r, 8).number_format = "0.0%"
+
+    # 相関行列も下部に出力。施策数が多すぎる場合も、Excelの横幅に注意しつつ全部出す。
+    matrix = result.get("correlation_matrix", pd.DataFrame())
+    matrix_start = start_row + 5 + max(len(pairs), 1)
+    ws.cell(matrix_start, 1).value = "相関行列"
+    ws.cell(matrix_start, 1).font = Font(bold=True)
+
+    if matrix.empty:
+        ws.cell(matrix_start + 1, 1).value = "相関行列を作成できませんでした"
+    else:
+        # ヘッダー
+        for c_idx, col_name in enumerate(matrix.columns, 2):
+            cell = ws.cell(matrix_start + 1, c_idx)
+            cell.value = col_name
+            cell.font = Font(bold=True)
+            cell.border = thin
+
+        # 行名 + 値
+        for r_idx, row_name in enumerate(matrix.index, matrix_start + 2):
+            ws.cell(r_idx, 1).value = row_name
+            ws.cell(r_idx, 1).font = Font(bold=True)
+            ws.cell(r_idx, 1).border = thin
+            for c_idx, col_name in enumerate(matrix.columns, 2):
+                cell = ws.cell(r_idx, c_idx)
+                cell.value = float(matrix.loc[row_name, col_name])
+                cell.number_format = "0.000"
+                cell.border = thin
+
+    auto_fit_columns(ws, max_width=40)
+
+
 def run_regression_all_sheets(input_bytes):
     xls = pd.ExcelFile(io.BytesIO(input_bytes))
 
@@ -497,7 +655,14 @@ def run_regression_all_sheets(input_bytes):
         pred_ws = wb.create_sheet(make_unique_sheet_name(wb, sheet[:28] + "_予測"))
         write_prediction_sheet(pred_ws, sheet, result)
 
+        corr_ws = wb.create_sheet(make_unique_sheet_name(wb, sheet[:28] + "_相関"))
+        write_correlation_sheet(corr_ws, sheet, result)
+
         top_strategy = result["ranking"].iloc[0]["施策"] if len(result["ranking"]) else None
+        corr_pairs = result.get("correlation_pairs", pd.DataFrame())
+        high_corr_count = int((corr_pairs["相関"].abs() >= 0.90).sum()) if not corr_pairs.empty else 0
+        mid_corr_count = int(((corr_pairs["相関"].abs() >= 0.70) & (corr_pairs["相関"].abs() < 0.90)).sum()) if not corr_pairs.empty else 0
+
         summary_rows.append({
             "媒体/シート": sheet,
             "ステータス": "完了",
@@ -506,6 +671,8 @@ def run_regression_all_sheets(input_bytes):
             "RMSE": result["metrics"]["RMSE"],
             "Best Alpha": result["metrics"]["Best Alpha"],
             "上位施策": top_strategy,
+            "相関_高ペア数": high_corr_count,
+            "相関_中ペア数": mid_corr_count,
         })
         created += 1
 
